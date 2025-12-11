@@ -13,3 +13,15 @@ A lightweight WordPress plugin that boots the `Sovos\SovosIntegration` class for
 4. Activate **Sovos Tax Plugin** from the WordPress admin Plugins screen.
 
 On successful load, the plugin exposes a global `$sovos_integration` instance you can use to calculate taxes or interact with Sovos.
+
+## Reducing unnecessary Sovos calls
+To keep transaction volume low, the integration skips Sovos API requests when it detects orders that should not generate tax:
+
+- Customers with wholesale roles (default: `wholesale_customer`, `wholesaler`, `b2b`).
+- Orders that have an active reseller certificate on file (tax exempt).
+- Orders where every product is marked tax-exempt in WooCommerce (`tax_status` of `none`).
+
+You can override the detection logic via filters:
+
+- `sovos_integration_is_wholesale_customer` — change how wholesale customers are identified.
+- `sovos_integration_is_tax_exempt_product` — mark additional products as tax exempt.

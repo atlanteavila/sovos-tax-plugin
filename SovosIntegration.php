@@ -762,6 +762,12 @@ class SovosIntegration
 
         $this->isOrderClientTaxExempt();
 
+        if ($this->shouldBypassSovosRequest($salesTaxData)) {
+            $this->hydrateZeroTaxResponse($salesTaxData);
+
+            return $this;
+        }
+
         $this->request($salesTaxData);
         $this->processResponse();
 
@@ -785,6 +791,157 @@ class SovosIntegration
 
         $this->isTaxExempt = !empty($cert);
         return $this->isTaxExempt;
+    }
+
+    /**
+     * Decide whether we can skip making a Sovos API request to reduce transaction volume.
+     *
+     * @param array $salesTaxData
+     */
+    protected function shouldBypassSovosRequest(array $salesTaxData): bool
+    {
+        // Skip if the customer is recognized as a wholesaler/reseller.
+        if ($this->isWholesaleCustomer()) {
+            $this->debug('Wholesale customer detected, skipping Sovos call.', 'bypass');
+
+            return true;
+        }
+
+        // Skip if the order is covered by a valid tax exemption certificate.
+        if ($this->isTaxExempt) {
+            $this->debug('Tax exempt order detected, skipping Sovos call.', 'bypass');
+
+            return true;
+        }
+
+        // Skip when all products involved are marked tax exempt in WooCommerce.
+        if ($this->areAllProductsTaxExempt($salesTaxData)) {
+            $this->debug('All products are tax exempt, skipping Sovos call.', 'bypass');
+
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Determine whether the current customer should be treated as a wholesaler and avoid Sovos calls.
+     */
+    protected function isWholesaleCustomer(): bool
+    {
+        if (is_null($this->customer_id) || $this->customer_id === 0) {
+            return false;
+        }
+
+        $user = get_userdata($this->customer_id);
+
+        if ($user === false) {
+            return false;
+        }
+
+        $roles = $user->roles ?? [];
+
+        // Common wholesale roles used by WooCommerce wholesale extensions.
+        $wholesaleRoles = ['wholesale_customer', 'wholesaler', 'b2b'];
+
+        $isWholesale = (bool) array_intersect($wholesaleRoles, $roles);
+
+        /**
+         * Filter to allow custom logic for wholesale detection.
+         *
+         * @param bool   $isWholesale
+         * @param int    $customer_id
+         * @param array  $roles
+         */
+        return (bool) apply_filters('sovos_integration_is_wholesale_customer', $isWholesale, $this->customer_id, $roles);
+    }
+
+    /**
+     * Check whether every product in the request is already marked tax exempt.
+     *
+     * @param array $salesTaxData
+     */
+    protected function areAllProductsTaxExempt(array $salesTaxData): bool
+    {
+        $items = $salesTaxData['order_details']['order_items'] ?? [];
+
+        if (empty($items)) {
+            return false;
+        }
+
+        $allExempt = true;
+
+        foreach ($items as $item) {
+            $product_id = $item['product_id'] ?? null;
+
+            if (is_null($product_id)) {
+                $allExempt = false;
+                break;
+            }
+
+            $isExempt = false;
+
+            if (function_exists('wc_get_product')) {
+                $product = wc_get_product($product_id);
+                if ($product instanceof \WC_Product) {
+                    $isExempt = $product->get_tax_status() === 'none';
+                }
+            }
+
+            /**
+             * Filter to override the tax-exempt status check per product.
+             *
+             * @param bool $isExempt   Current exemption status.
+             * @param int  $product_id Product being evaluated.
+             */
+            $isExempt = (bool) apply_filters('sovos_integration_is_tax_exempt_product', $isExempt, $product_id);
+
+            if (!$isExempt) {
+                $allExempt = false;
+                break;
+            }
+        }
+
+        return $allExempt;
+    }
+
+    /**
+     * Populate an empty response for bypassed requests so downstream consumers have consistent data.
+     *
+     * @param array $salesTaxData
+     */
+    protected function hydrateZeroTaxResponse(array $salesTaxData): void
+    {
+        $this->productsTax = 0;
+        $this->automaticDeliveryFee = 0;
+        $this->shippingFee = 0;
+
+        $lineResults = [];
+        $this->lineItems = [];
+
+        foreach ($salesTaxData['order_details']['order_items'] ?? [] as $index => $item) {
+            $grossAmt = (float) ($item['line_total'] ?? 0);
+
+            $lineResults[$index] = (object) [
+                'lnNm' => $index + 1,
+                'txAmt' => 0,
+                'grossAmt' => $grossAmt,
+                'jurRslts' => [],
+            ];
+
+            $this->lineItems[] = (object) [
+                'id' => $this->getProductIdBySite($item['product_id'] ?? null),
+                'product_id' => $item['product_id'] ?? null,
+                'taxable_amount' => $grossAmt,
+                'tax_collectable' => 0,
+            ];
+        }
+
+        $this->response = (object) [
+            'txAmt' => 0,
+            'lnRslts' => $lineResults,
+            'txwTrnDocId' => null,
+        ];
     }
 
     /**
