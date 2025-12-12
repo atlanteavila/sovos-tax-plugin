@@ -838,10 +838,15 @@ class Woo_Sovos_Public {
      * @param array - $line_items The cart or order items.
      * 
      * @return mixed array|bool - The response from the tax service if it is valid, false otherwise.
-     * 
+     *
      * @since   1.0.0
      */
     public function calculate_tax( $line_items, $order_id ) {
+        $cached_response = $this->get_stored_tax_quote( $line_items, $order_id );
+
+        if ( $cached_response )
+            return $cached_response;
+
         $tax_service = $this->prepare_tax_service( $line_items );
 
         if ( ! $tax_service )
@@ -1144,6 +1149,9 @@ class Woo_Sovos_Public {
 
         // Set the _sovos_tax data
         $sovos_tax = [ 'tax_rate' => $tax_rate ];
+
+        if ( $this->is_valid_tax_response( $response ) )
+            $sovos_tax['response'] = $response;
 
         return $sovos_tax;
 
@@ -2589,7 +2597,54 @@ class Woo_Sovos_Public {
         }
     }
 
-    public function clear_tax_quote_cache( $order_id ): void {    
+    /**
+     * Determine if a Sovos tax response is usable without another API call.
+     */
+    protected function is_valid_tax_response( $response ): bool {
+        return is_array( $response ) &&
+            isset( $response['success'] ) &&
+            true === $response['success'] &&
+            isset( $response['data'] ) &&
+            is_array( $response['data'] );
+    }
+
+    /**
+     * Pull a previously fetched quote from session or order meta.
+     */
+    protected function get_stored_tax_quote( array $line_items, $order_id ) {
+        $cache_key = $this->generate_cache_key( $line_items );
+        $cached    = $this->get_cached_quote( $cache_key );
+
+        if ( $this->is_valid_tax_response( $cached ) )
+            return $cached;
+
+        $session = $this->get_wc_session();
+
+        if ( $session ) {
+            $session_response = $session->get( 'sovos_tax_response' );
+
+            if ( $this->is_valid_tax_response( $session_response ) )
+                return $session_response;
+        }
+
+        if ( $order_id ) {
+            $order = wc_get_order( $order_id );
+
+            if ( $order ) {
+                $sovos_tax     = $order->get_meta( '_sovos_tax', true );
+                $meta_response = is_array( $sovos_tax ) && isset( $sovos_tax['response'] ) ?
+                    $sovos_tax['response'] :
+                    false;
+
+                if ( $this->is_valid_tax_response( $meta_response ) )
+                    return $meta_response;
+            }
+        }
+
+        return false;
+    }
+
+    public function clear_tax_quote_cache( $order_id ): void {
         $session = WC()->session;
     
         if ( ! $session || ! method_exists( $session, 'get_session_data' ) ) {
