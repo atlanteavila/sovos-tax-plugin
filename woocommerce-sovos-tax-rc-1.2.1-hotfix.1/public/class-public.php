@@ -294,13 +294,28 @@ class Woo_Sovos_Public {
 
             // $customer_address elements will be empty if $type is not shipping OR if shipping address is not set.
             // Default to Billing Address.
-            if ( $this->is_address_empty( $customer_address ) ) :
-                $customer_address['address']  = $object->get_billing_address_1();
-                $customer_address['city']     = $object->get_billing_city();
-                $customer_address['state']    = $object->get_billing_state();
-                $customer_address['postcode'] = $object->get_billing_postcode();
-                $customer_address['country']  = $object->get_billing_country();
-            endif;
+            if ( $this->is_address_empty( $customer_address ) ) {
+                // Look at the appropriate set first, then fall back to the other.
+                $order_of_prefixes = ($type === 'shipping') ? array('shipping_', 'billing_') : array('billing_', 'shipping_');
+
+                foreach ($order_of_prefixes as $p) {
+                    $country = isset($_POST[$p . 'country']) ? wc_clean(wp_unslash($_POST[$p . 'country'])) : '';
+                    $state = isset($_POST[$p . 'state']) ? wc_clean(wp_unslash($_POST[$p . 'state'])) : '';
+                    $postcode = isset($_POST[$p . 'postcode']) ? wc_clean(wp_unslash($_POST[$p . 'postcode'])) : '';
+                    $city = isset($_POST[$p . 'city']) ? wc_clean(wp_unslash($_POST[$p . 'city'])) : '';
+                    $addr1 = isset($_POST[$p . 'address_1']) ? wc_clean(wp_unslash($_POST[$p . 'address_1'])) : '';
+
+                    if ($country && ($state || $postcode || $city)) {
+                        $customer_address['address'] = $addr1 ?: 'N/A';
+                        $customer_address['city'] = $city;
+                        $customer_address['state'] = $state;
+                        $customer_address['postcode'] = $postcode;
+                        $customer_address['country'] = $country;
+                        break;
+                    }
+                }
+            }
+
         endif; // endif ( $object ) :
 
         // If address is empty try to get it from the $_POST array.
@@ -1138,9 +1153,6 @@ class Woo_Sovos_Public {
         if ( ! $tax_rate )
             return $sovos_tax;
 
-        // Create Unique ID for Tax Rate
-        $tax_rate_id             = $this->get_unique_id_from_response( $response );
-        $tax_rate['tax_rate_id'] = $tax_rate_id;
 
         // Set the _sovos_tax data
         $sovos_tax = [ 'tax_rate' => $tax_rate ];
@@ -1160,70 +1172,70 @@ class Woo_Sovos_Public {
      * 
      * @since   1.2.0
      */
-    public function construct_sovos_tax_items_data( $response, $line_items, $type_of_items = null ) {
+    public function construct_sovos_tax_items_data($response, $line_items, $type_of_items = null)
+    {
         $sovos_tax_items = [];
 
-        // Check if the response is valid
-        if (
-            ! $response['success'] ||
-            ! isset( $response['data']['lnRslts'] )
-        )
+        // Validate response
+        if (!$response['success'] || !isset($response['data']['lnRslts'])) {
             return $sovos_tax_items;
+        }
 
-        $line_items_reindexed = array_values( $line_items ); // Reindex the array numerically
+        // Reindex numerically so [$index] lines up with Sovos lnRslts index
+        $line_items_reindexed = array_values($line_items);
 
-        foreach ( $response['data']['lnRslts'] as $index => $sovos_line_item ) :
+        foreach ($response['data']['lnRslts'] as $index => $sovos_line_item) {
 
-            // Get Corresponding $line_item
-            $line_item_by_index  = $line_items_reindexed[$index];
-            $line_item_key       = is_array( $line_item_by_index ) ? // Is a Cart Item
-                $line_item_by_index['key'] : // Use Key
-                $line_item_by_index->get_id(); // Otherwise is an Order Item, use index.
-            $line_item           = $line_items[$line_item_key];
-
-            if ( ! $line_item )
+            // Match the corresponding line item
+            if (!isset($line_items_reindexed[$index])) {
                 continue;
+            }
 
-            if ( $type_of_items === null ) :
-                if ( is_array( $line_item ) ) :
-                    $type_of_items = 'cart_items';
-                else :
-                    $type_of_items = 'order_items';
-                endif;
-            endif;
+            $line_item_by_index = $line_items_reindexed[$index];
 
-            $line_item_product = $type_of_items === 'cart_items' ?
-                $line_item['data'] :
-                $line_item;
+            // Cart item → use cart item key; Order item → use item ID
+            $line_item_key = is_array($line_item_by_index)
+                ? $line_item_by_index['key']
+                : $line_item_by_index->get_id();
 
+            if (!isset($line_items[$line_item_key])) {
+                continue;
+            }
+
+            $line_item = $line_items[$line_item_key];
+
+            // Detect type once
+            if ($type_of_items === null) {
+                $type_of_items = is_array($line_item) ? 'cart_items' : 'order_items';
+            }
+
+            // Get tax class off the product/item
+            $line_item_product = ($type_of_items === 'cart_items') ? $line_item['data'] : $line_item;
             $tax_class = $line_item_product->get_tax_class();
 
-            $tax_rate  = $this->create_tax_rate( $sovos_line_item, $tax_class );
-
-            // Bail if the tax rate is not created
-            if ( ! $tax_rate )
+            // Build a Woo-compatible tax rate array (NO tax_rate_id here)
+            $tax_rate = $this->create_tax_rate($sovos_line_item, $tax_class);
+            if (!$tax_rate) {
                 continue;
+            }
 
-            // Create Unique ID for Tax Rate
-            $tax_rate_id             = $this->get_unique_id_from_response( $response );
-            $tax_rate['tax_rate_id'] = $tax_rate_id;
-
-            if ( $type_of_items === 'cart_items' ) :
-                $sovos_tax = isset( $line_item['_sovos_tax'] ) ?
-                    $line_item['_sovos_tax'] :
-                    [];
-                $sovos_tax['tax_rate']    = $tax_rate;
-                $sovos_tax['_tax_quoted'] = true;
-            else:
-                $sovos_tax             = $line_item->get_meta( '_sovos_tax' ) ? : [];
+            // Attach Sovos meta to the item for later use
+            if ($type_of_items === 'cart_items') {
+                $sovos_tax = isset($line_item['_sovos_tax']) ? $line_item['_sovos_tax'] : [];
                 $sovos_tax['tax_rate'] = $tax_rate;
                 $sovos_tax['_tax_quoted'] = true;
-                $line_item->update_meta_data( '_sovos_tax', $sovos_tax );
+                $line_item['_sovos_tax'] = $sovos_tax; // keep in-memory for this request
+            } else {
+                $sovos_tax = $line_item->get_meta('_sovos_tax') ?: [];
+                $sovos_tax['tax_rate'] = $tax_rate;
+                $sovos_tax['_tax_quoted'] = true;
+                $line_item->update_meta_data('_sovos_tax', $sovos_tax);
                 $line_item->save_meta_data();
-            endif;
+            }
 
+            // Return the updated item in the collection
             $sovos_tax_items[$line_item_key] = $line_item;
-        endforeach; // endforeach ( $response['data']['lnRslts'] as $index => $sovos_line_item ) :
+        }
 
         return $sovos_tax_items;
     }
@@ -1685,29 +1697,63 @@ class Woo_Sovos_Public {
     }
 
     /**
-     * Insert Tax Rate
-     * 
-     * @param array - $tax_rate The tax rate.
-     * 
-     * @return int - The tax rate ID.
-     * 
-     * @since 1.0.0
+     * Insert Tax Rate (robust across WC versions)
+     *
+     * @param array $tax_rate
+     * @return int New or existing tax_rate_id
      */
     public function insert_tax_rate( $tax_rate ) {
-        $existing_tax_rate_id = $this->get_existing_tax_rate( $tax_rate );
-
-        // Check if the tax rate already exists.
-        if ( $existing_tax_rate_id ) :
-            // The tax rate already exists, so use the existing tax rate ID.
-            $tax_rate_id = $existing_tax_rate_id;
-        else :
-            // The tax rate doesn't exist, so insert a new tax rate.
-            $tax_rate_id = \WC_Tax::_insert_tax_rate( $tax_rate );
-        endif;
-
-        return $tax_rate_id;
-
+    // Never accept a caller-provided primary key
+    if ( isset( $tax_rate['tax_rate_id'] ) ) {
+        unset( $tax_rate['tax_rate_id'] );
     }
+
+    // 🔒 Normalize so identical jurisdictions reuse ONE row
+    $tax_rate['tax_rate_class'] = '';                // Standard class only
+    $tax_rate['tax_rate_name']  = 'Sovos Combined';  // <- constant label, not per-jurisdiction
+
+    // Provide safe defaults
+    if ( ! isset( $tax_rate['tax_rate_postcode'] ) ) $tax_rate['tax_rate_postcode'] = '';
+    if ( ! isset( $tax_rate['tax_rate_city'] ) )     $tax_rate['tax_rate_city']     = '';
+    if ( ! isset( $tax_rate['tax_rate_priority'] ) ) $tax_rate['tax_rate_priority'] = 1;
+    if ( ! isset( $tax_rate['tax_rate_order'] ) )    $tax_rate['tax_rate_order']    = 1;
+
+    // Normalize types
+    $tax_rate['tax_rate']          = isset( $tax_rate['tax_rate'] ) ? (float) $tax_rate['tax_rate'] : 0.0;
+    $tax_rate['tax_rate_compound'] = empty( $tax_rate['tax_rate_compound'] ) ? 0 : 1;
+    $tax_rate['tax_rate_shipping'] = empty( $tax_rate['tax_rate_shipping'] ) ? 0 : 1;
+
+    // Reuse identical rate if it already exists
+    $existing_tax_rate_id = $this->get_existing_tax_rate( $tax_rate ); // you can keep your current query
+    if ( $existing_tax_rate_id ) {
+        return (int) $existing_tax_rate_id;
+    }
+
+    // Prefer Woo helper if available, otherwise insert directly
+    if ( method_exists( '\WC_Tax', '_insert_tax_rate' ) ) {
+        return (int) \WC_Tax::_insert_tax_rate( $tax_rate );
+    }
+
+    global $wpdb;
+    $row = array(
+        'tax_rate_country'  => strtoupper( (string) ( $tax_rate['tax_rate_country'] ?? '' ) ),
+        'tax_rate_state'    => strtoupper( (string) ( $tax_rate['tax_rate_state'] ?? '' ) ),
+        'tax_rate'          => wc_format_decimal( (float) ( $tax_rate['tax_rate'] ?? 0 ), 4 ),
+        'tax_rate_name'     => substr( (string) ( $tax_rate['tax_rate_name'] ?? 'Sovos Combined' ), 0, 200 ),
+        'tax_rate_priority' => (int) ( $tax_rate['tax_rate_priority'] ?? 1 ),
+        'tax_rate_compound' => (int) ( $tax_rate['tax_rate_compound'] ?? 0 ),
+        'tax_rate_shipping' => (int) ( $tax_rate['tax_rate_shipping'] ?? 0 ),
+        'tax_rate_order'    => (int) ( $tax_rate['tax_rate_order'] ?? 1 ),
+        'tax_rate_class'    => (string) ( $tax_rate['tax_rate_class'] ?? '' ),
+    );
+    $wpdb->insert( $wpdb->prefix . 'woocommerce_tax_rates', $row, array('%s','%s','%s','%s','%d','%d','%d','%d','%s') );
+    $new_id = (int) $wpdb->insert_id;
+    if ( $new_id ) {
+        do_action( 'woocommerce_tax_rate_added', $new_id, $tax_rate );
+    }
+    return $new_id;
+}
+
 
     /**
      * Are Any Line Results Exempt
@@ -1869,12 +1915,6 @@ class Woo_Sovos_Public {
                     ! isset( $line_item['_sovos_tax']['_tax_added'] ) ||
                     ! $line_item['_sovos_tax']['_tax_added']
                 ) :
-                    // Add the tax to the line subtotal.
-                    $line_item['line_subtotal'] += $tax_amount;
-                    $line_item['line_subtotal_tax'] += $tax_amount;
-                    $line_item['line_total'] += $tax_amount;
-                    $line_item['line_tax'] += $tax_amount;
-
                     // Mark the tax as added.
                     $line_item['_sovos_tax']['_tax_added'] = true;
                 endif;
@@ -1899,21 +1939,25 @@ class Woo_Sovos_Public {
      * @hooked woocommerce_before_calculate_totals
      * 
      */
-    public function set_tax_rates_on_cart_items( $cart ) {
-        // Check if the action is fired in the admin.
-        if ( is_admin() && ! defined( 'DOING_AJAX' ) )
-            return;
+    public function set_tax_rates_on_cart_items($cart)
+    {
+        // No-op: we do NOT mutate cart line totals anymore.
+        return;
 
-        if ( did_action( 'woocommerce_before_calculate_totals' ) >= 2 )
-            return;
+        // // Check if the action is fired in the admin.
+        // if (is_admin() && !defined('DOING_AJAX'))
+        //     return;
 
-        // Only set tax rate on checkout.
-        if ( ! is_checkout() )
-            return;
+        // if (did_action('woocommerce_before_calculate_totals') >= 2)
+        //     return;
 
-        $cart_items = $cart->get_cart();
-        $cart_items = $this->set_tax_rates( $cart_items );
-        $cart->calculate_totals();
+        // // Only set tax rate on checkout.
+        // if (!is_checkout())
+        //     return;
+
+        // $cart_items = $cart->get_cart();
+        // $cart_items = $this->set_tax_rates($cart_items);
+        // $cart->calculate_totals();
     }
 
     /**
@@ -1929,40 +1973,33 @@ class Woo_Sovos_Public {
      * 
      * @hooked woocommerce_checkout_create_order_tax_item
      */
-    public function add_sovos_tax_rate_to_new_order_item( $item, $tax_rate_id, $order ) {
-        // Get the order items.
+    public function add_sovos_tax_rate_to_new_order_item($item, $tax_rate_id, $order)
+    {
         $order_items = $order->get_items();
 
-        // Loop through the order items.
-        foreach ( $order_items as $order_item ) {
-            // Get the _sovos_tax meta data.
-            $sovos_tax = $order_item->get_meta( '_sovos_tax', true );
+        foreach ($order_items as $order_item) {
+            $sovos_tax = $order_item->get_meta('_sovos_tax', true);
 
-            if (
-                ! $order_item->get_type() === 'line_item' ||
-                ! $sovos_tax
-            )
+            if ('line_item' !== $order_item->get_type() || !$sovos_tax || !isset($sovos_tax['tax_rate'])) {
                 continue;
+            }
 
-            // Check if the tax_rate key exists in the sovos_tax meta data.
-            if ( ! isset( $sovos_tax['tax_rate'] ) )
-                continue;
+            $real_rate_id = $this->insert_tax_rate($sovos_tax['tax_rate']); // ← get Woo’s int id
 
-            // Set the tax item properties.
-            $tax_rate_name = 'sovos-' . sanitize_title( $sovos_tax['tax_rate']['tax_rate_name'] );
-            $item->set_name( $tax_rate_name );
-            $item->set_rate_id( $sovos_tax['tax_rate']['tax_rate_id'] );
-            $item->set_tax_total( $order_item->get_total_tax() );
-            $item->set_label( $sovos_tax['tax_rate']['tax_rate_name'] );
-            $item->set_shipping_tax_total( $sovos_tax['tax_rate']['tax_rate_shipping'] );
-            $item->set_compound( $sovos_tax['tax_rate']['tax_rate_compound'] );
-            $item->set_rate_percent( $sovos_tax['tax_rate']['tax_rate'] );
+            $tax_rate_name = 'sovos-' . sanitize_title($sovos_tax['tax_rate']['tax_rate_name']);
+            $item->set_name($tax_rate_name);
+            $item->set_rate_id($real_rate_id); // ← use it here
+            $item->set_tax_total($order_item->get_total_tax());
+            $item->set_label($sovos_tax['tax_rate']['tax_rate_name']);
+            $item->set_shipping_tax_total($sovos_tax['tax_rate']['tax_rate_shipping']);
+            $item->set_compound($sovos_tax['tax_rate']['tax_rate_compound']);
+            $item->set_rate_percent($sovos_tax['tax_rate']['tax_rate']);
 
             $tax_rate_code = $tax_rate_name . '-' . $sovos_tax['tax_rate']['tax_rate'];
-            $item->set_rate_code( $tax_rate_code );
-
+            $item->set_rate_code($tax_rate_code);
         }
     }
+
 
     /**
      * Get Sovos Tax Data from Line Item
@@ -2003,127 +2040,208 @@ class Woo_Sovos_Public {
      * 
      * TODO: check woocommerce_checkout_create_order_tax_item and WC_Order_Item_Tax functionality. This might be a better way to add the tax to the items.
      */
-    public function replace_matched_tax_rates( $matched_tax_rates, $country, $state, $postcode, $city ) {
-        // Ensure we're not processing during checkout or AJAX updates for order review
+    public function replace_matched_tax_rates($matched_tax_rates, $country, $state, $postcode, $city)
+    {
+        // ── logger helper ───────────────────────────────────────────────
+        $log = function ($msg) {
+            if (function_exists('wc_get_logger')) {
+                wc_get_logger()->info($msg, ['source' => 'sovos']);
+            }
+        };
+
+        $log(sprintf(
+            'HIT replace_matched_tax_rates | ctx: country=%s state=%s postcode=%s city=%s',
+            (string) $country,
+            (string) $state,
+            (string) $postcode,
+            (string) $city
+        ));
+
+        // Only take over during checkout/order-review ajax/admin edits
         $is_checkout = is_checkout();
         $is_ajax = defined('DOING_AJAX') && DOING_AJAX && isset($_POST['action']) && $_POST['action'] === 'woocommerce_update_order_review';
         $is_admin = is_admin();
+        $log(sprintf('FLAGS: checkout=%d ajax=%d admin=%d', $is_checkout ? 1 : 0, $is_ajax ? 1 : 0, $is_admin ? 1 : 0));
 
-        if (
-            ! $is_checkout && ! $is_ajax  && !$is_admin
-        ) {
-            return $matched_tax_rates; 
-        }   
+        if (!$is_checkout && !$is_ajax && !$is_admin) {
+            $log('EARLY RETURN: not checkout/ajax/admin');
+            return $matched_tax_rates; // leave cart page alone
+        }
 
-        // On Edit Orders Page
+        // Sovos is source of truth → start fresh (remove any WC table matches)
+        $matched_tax_rates = [];
+
+        // Context: order in admin, otherwise cart
         global $post;
-        $order_id = $post ?
-            $post->ID :
-            $_GET['post'];
-        // Might be an AJAX call.
-        if ( ! $order_id && isset( $_POST['order_id'] ) )
-            $order_id = $_POST['order_id'];
+        $order_id = $post ? $post->ID : (isset($_GET['post']) ? (int) $_GET['post'] : 0);
+        if (!$order_id && isset($_POST['order_id'])) {
+            $order_id = (int) $_POST['order_id'];
+        }
+        $order = $order_id ? wc_get_order($order_id) : false;
 
-        $order = wc_get_order( $order_id );
-
-        if ( ! $order ) :
-            // Get the cart items.
-            $cart = $this->get_cart();
-            if ( ! $cart )
+        if ($order) {
+            $log("CTX: editing order_id={$order_id}");
+            if ($this->is_order_created_via_rest($order)) {
+                $log('EARLY RETURN: order created via REST');
                 return $matched_tax_rates;
-        endif;
-
-        // Get line items from Cart or Order.
-        if ( $order ) :
-            // Ensure this is not a REST API Order.
-            if ( $this->is_order_created_via_rest( $order ) )
-                return $matched_tax_rates;
-
-            $line_items    = $order->get_items();
+            }
+            $line_items = $order->get_items();
             $type_of_items = 'order_items';
-        else :
-            $line_items    = $cart->get_cart();
+        } else {
+            $cart = $this->get_cart();
+            if (!$cart) {
+                $log('EARLY RETURN: no cart');
+                return $matched_tax_rates;
+            }
+            $line_items = $cart->get_cart();
             $type_of_items = 'cart_items';
-        endif;
+            $log('CTX: cart mode');
+        }
 
-        if ( empty( $line_items ) )
+        $li_count = is_array($line_items) ? count($line_items) : 0;
+        $log("LINE ITEMS: count={$li_count}");
+        if (empty($line_items)) {
+            $log('EARLY RETURN: empty line items');
             return $matched_tax_rates;
+        }
 
-        $tax_quoted = false;
-        foreach ( $line_items as $line_item ) :
-            $sovos_tax = $this->get_sovos_tax_data_from_line_item( $line_item );
-            if ( ! $sovos_tax )
-                continue;
+        // Quote Sovos
+        $response = $this->quote_tax($line_items);
 
-            if ( $sovos_tax['_tax_quoted'] )
-                $tax_quoted = true;
-                break;
-        endforeach;
+        $success = !empty($response['success']);
+        $ln_count = isset($response['data']['lnRslts']) && is_array($response['data']['lnRslts']) ? count($response['data']['lnRslts']) : 0;
+        $txAmt = isset($response['data']['txAmt']) ? $response['data']['txAmt'] : 'n/a';
+        $log(sprintf('SOVOS: success=%d lnRslts=%d txAmt=%s', $success ? 1 : 0, $ln_count, (string) $txAmt));
 
-        if ( $tax_quoted )
+        if (!$success) {
+            $log('EARLY RETURN: sovos response success=false');
             return $matched_tax_rates;
-
-        // TODO Create method to get stored sovos tax rate and if not, get quote_tax from sovos
-        $response = $this->quote_tax( $line_items );
-
-        // Check if is tax exempt.
-        $is_tax_exempt = $this->are_any_line_results_exempt( $response );
-
-        if (
-            ! $response['success'] ||
-            $is_tax_exempt ||
-            ! isset( $response['data']['lnRslts'] )
-        )
+        }
+        if ($ln_count === 0) {
+            $log('EARLY RETURN: sovos lnRslts empty');
             return $matched_tax_rates;
+        }
+        if ($this->are_any_line_results_exempt($response)) {
+            $log('EARLY RETURN: exempt lines (zero tax)');
+            return $matched_tax_rates;
+        }
 
-        // Add Sovos Tax Data to each Line Item.
-        $sovos_tax_items = $this->construct_sovos_tax_items_data( $response, $line_items, $type_of_items );
+        // Store per-line Sovos meta and build rates
+        $sovos_tax_items = $this->construct_sovos_tax_items_data($response, $line_items, $type_of_items);
+        $sti_count = is_array($sovos_tax_items) ? count($sovos_tax_items) : 0;
+        $log("SOVOS TAX ITEMS: count={$sti_count}");
 
-        // foreach ( $sovos_tax_items as $line_item ) :
-        foreach ( $sovos_tax_items as $line_item ) :
-            $tax_rate = $this->get_sovos_tax_rate( $line_item );
-            if ( ! $tax_rate )
+        // Dedupe across items that share the same jurisdiction + percent
+        $seen = [];
+
+        foreach ($sovos_tax_items as $line_item) {
+            $tax_rate = $this->get_sovos_tax_rate($line_item);
+            if (!$tax_rate || !is_array($tax_rate)) {
+                $log('SKIP: missing/invalid tax_rate on item');
                 continue;
+            }
 
-            // Check if a tax rate with the same ID already exists
-            if ( isset( $matched_tax_rates[$tax_rate['tax_rate_id']] ) )
+            $$sig = implode('|', [
+                $tax_rate['tax_rate_country'] ?? '',
+                $tax_rate['tax_rate_state'] ?? '',
+                number_format((float) ($tax_rate['tax_rate'] ?? 0), 4),
+                $tax_rate['tax_rate_class'] ?? '',
+            ]);
+
+            if (isset($seen[$sig])) {
+                $log("DEDUPE: signature already added ({$sig})");
                 continue;
+            }
+            $seen[$sig] = true;
 
-            $matched_tax_rates[$tax_rate['tax_rate_id']]= [
-                'rate'     => $tax_rate['tax_rate'],
-                'label'    => $tax_rate['tax_rate_name'],
-                // TODO: Make these settings within the plugin.
+            // Ensure a real Woo rate id (integer) and use it as the key
+            $rate_id = $this->insert_tax_rate($tax_rate);
+            if (isset($matched_tax_rates[$rate_id])) {
+                $log("DEDUPE: rate_id already present ({$rate_id})");
+                continue;
+            }
+
+            $matched_tax_rates[$rate_id] = [
+                'rate' => $tax_rate['tax_rate'],      // percent
+                'label' => $tax_rate['tax_rate_name'],
                 'shipping' => 'no',
                 'compound' => 'no',
             ];
-        endforeach; // foreach ( $sovos_tax_items as $line_item_key => $line_item ) :
+
+            $log(sprintf(
+                'ADD RATE: id=%s label="%s" rate=%s%%',
+                (string) $rate_id,
+                isset($tax_rate['tax_rate_name']) ? (string) $tax_rate['tax_rate_name'] : '',
+                isset($tax_rate['tax_rate']) ? (string) $tax_rate['tax_rate'] : ''
+            ));
+        }
+
+        $log('RETURNING rates: ' . print_r($matched_tax_rates, true));
 
         return $matched_tax_rates;
     }
 
+
+
+
     /**
-     * Transfer Cart Item Meta to Order Item
-     * 
-     * @param \WC_Order_Item - $item The order item.
-     * @param string - $cart_item_key The cart item key.
-     * @param array - $values The cart item values.
-     * 
-     * @return void
-     * 
-     * @since 1.0.0
-     * 
+     * Transfer Cart Item Meta to Order Item AND set per-line tax arrays
+     *
+     * Ensures taxes persist on the saved order by mapping the Sovos rate to a real
+     * Woo tax rate id and attaching the per-line tax amounts to the order item.
+     *
      * @hooked woocommerce_checkout_create_order_line_item
      */
-    public function transfer_cart_item_meta_to_order_item( $item, $cart_item_key, $values, $order ) {
-        if ( $this->is_order_created_via_rest( $order ) )
+    public function transfer_cart_item_meta_to_order_item($item, $cart_item_key, $values, $order)
+    {
+        // Skip REST-created orders per your existing rule
+        if ($this->is_order_created_via_rest($order)) {
             return;
+        }
 
-        if ( isset( $values['data'] ) ) :
-            if ( isset( $values['_sovos_tax'] ) ) :
-                $item->add_meta_data( '_sovos_tax', $values['_sovos_tax'], true );
-            endif;
-        endif;
+        // Safety: must have product line items only
+        if (!$item || 'line_item' !== $item->get_type()) {
+            return;
+        }
+
+        // 1) Pull the Sovos meta that was attached to the cart line
+        $sovos = isset($values['_sovos_tax']) ? $values['_sovos_tax'] : null;
+        if (!$sovos || empty($sovos['tax_rate']) || !is_array($sovos['tax_rate'])) {
+            return; // nothing to apply
+        }
+
+        // 2) Make sure we have a REAL Woo tax rate id (int) to reference
+        $rate_id = $this->insert_tax_rate($sovos['tax_rate']); // uses get_existing_tax_rate() internally
+        if (!$rate_id) {
+            return; // cannot set per-line tax arrays without a valid rate id
+        }
+
+        // 3) Determine the line's tax amount
+        // Prefer Woo's computed cart line tax if present (after matched_tax_rates patch, Woo will fill this)
+        $line_tax = 0.0;
+        if (isset($values['line_tax'])) {
+            $line_tax = (float) $values['line_tax'];
+        } elseif (isset($values['line_subtotal_tax'])) {
+            $line_tax = (float) $values['line_subtotal_tax'];
+        } elseif (isset($sovos['tax_amount'])) {
+            // Optional fallback if you later store txAmt into _sovos_tax['tax_amount']
+            $line_tax = (float) $sovos['tax_amount'];
+        }
+
+        // Normalize
+        $line_tax = wc_format_decimal($line_tax);
+
+        // 4) Tell Woo “this item has tax X at rate ID Y”
+        // Both subtotal and total arrays keyed by the integer rate id.
+        $item->set_taxes(array(
+            'subtotal' => array($rate_id => $line_tax),
+            'total' => array($rate_id => $line_tax),
+        ));
+
+        // 5) Keep the Sovos meta for admin/tooltips
+        $item->add_meta_data('_sovos_tax', $sovos, true);
     }
+
 
     /**
      * Get Tax Rate Meta
@@ -2180,18 +2298,19 @@ class Woo_Sovos_Public {
 
         $order_items = $order->get_items();
 
-        foreach ( $order_items as $order_item ) :
-            $tax_rate = $this->get_sovos_tax_rate( $order_item );
+        foreach ($order_items as $order_item):
+            $tax_rate = $this->get_sovos_tax_rate($order_item);
             if (
-                ! is_array( $tax_rate ) ||
-                ! isset( $tax_rate['tax_rate_id'] )
+                !is_array($tax_rate) ||
+                !isset($tax_rate['tax_rate_id'])
             )
                 continue;
 
-            $tax_rate_id              = $tax_rate['tax_rate_id'];
+            $tax_rate_id = $tax_rate['tax_rate_id'];
 
-            // Delete the temporary tax rate.
-            \WC_Tax::_delete_tax_rate( $tax_rate_id );
+            if (method_exists('\WC_Tax', '_delete_tax_rate')) {
+                \WC_Tax::_delete_tax_rate( $tax_rate_id);
+            }
         endforeach;
 
     }
@@ -2372,7 +2491,9 @@ class Woo_Sovos_Public {
 
         // Delete the tax rate
         foreach ( $GLOBALS['temp_tax_rate_ids'] as $tax_rate_id ) :
-            \WC_Tax::_delete_tax_rate( $tax_rate_id );
+            if (method_exists('\WC_Tax', '_delete_tax_rate')) {
+                \WC_Tax::_delete_tax_rate( $tax_rate_id );
+            }
         endforeach;
 
         // Unset the global variable to indicate that the tax rates have been deleted
@@ -2610,5 +2731,20 @@ class Woo_Sovos_Public {
         } catch ( Exception $e ) {
             error_log("Exception while clearing tax quote cache: " . $e->getMessage());
         }
-    }   
+    }
+    /**
+     * Finalize order taxes after all items are created.
+     *
+     * @hooked woocommerce_checkout_create_order  (priority 100)
+     */
+    public function finalize_order_taxes_on_create($order, $data)
+    {
+        // Skip REST-created orders as in your other logic
+        if ($this->is_order_created_via_rest($order)) {
+            return;
+        }
+        // Let Woo build order-level tax items from the per-line arrays we just set.
+        $order->calculate_taxes();
+        $order->save();
+    }
 }
