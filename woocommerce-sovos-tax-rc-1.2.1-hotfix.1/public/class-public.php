@@ -1276,6 +1276,9 @@ class Woo_Sovos_Public {
         if ( ! $sovos_tax )
             return;
 
+        // Persist the response for future use when the order transitions to processing.
+        $sovos_tax['response'] = $response;
+
         // TODO: Refactor this method to use stored Sovos Tax Item Data instead of $response.
         $this->add_sovos_order_notes( $order, $response );
 
@@ -1306,14 +1309,36 @@ class Woo_Sovos_Public {
             return;
 
         $order_items = $order->get_items();
-        $response    = $this->calculate_tax( $order_items, $order_id );
+        $response    = $this->get_stored_sovos_response( $order, $order_items );
+
+        // Fall back to a live quote only when no stored payload is available.
+        if ( ! $response )
+            $response = $this->calculate_tax( $order_items, $order_id );
 
         // Check if the response is valid.
-        if ( $response['success'] && isset( $response['data']['txwTrnDocId'] ) ) :
+        if (
+            $response &&
+            $response['success'] &&
+            isset( $response['data']['txwTrnDocId'] )
+        ) :
+            $sovos_tax  = $order->get_meta( '_sovos_tax', true );
+            $sovos_tax  = is_array( $sovos_tax ) ? $sovos_tax : [];
+            $order_note = __( 'SOVOS Calculate Tax Transaction Created.<br />Transaction ID: ' . $response['data']['txwTrnDocId'], WOO_SOVOS_DOMAIN );
+
             // Store the txwTrnDocId as order meta data.
             $order->update_meta_data( 'txwTrnDocId', $response['data']['txwTrnDocId'] );
-            $order_note = __( 'SOVOS Calculate Tax Transaction Created.<br />Transaction ID: ' . $response['data']['txwTrnDocId'], WOO_SOVOS_DOMAIN );
             $order->add_order_note( $order_note );
+
+            // Add detailed Sovos notes if they were not written earlier.
+            if ( empty( $sovos_tax['_sovos_order_notes_added'] ) ) {
+                $this->add_sovos_order_notes( $order, $response );
+                $sovos_tax['_sovos_order_notes_added'] = true;
+            }
+
+            // Keep the response handy for later use.
+            $sovos_tax['response'] = $response;
+
+            $order->update_meta_data( '_sovos_tax', $sovos_tax );
             $order->save();
         endif;
     }
@@ -1334,6 +1359,38 @@ class Woo_Sovos_Public {
         endif; // endif ( isset( $array['request'][$old_key] ) ) :
 
         return $array;
+    }
+
+    /**
+     * Retrieve an existing Sovos response from session cache or order meta.
+     *
+     * @param \WC_Order $order The order.
+     * @param array     $line_items The order items.
+     *
+     * @return array|false Stored response array or false when unavailable.
+     */
+    protected function get_stored_sovos_response( $order, $line_items ) {
+        $response = false;
+
+        // Session cache: first the raw response, then the keyed quote cache.
+        $session = $this->get_wc_session();
+        if ( $session ) {
+            $response = $session->get( 'sovos_tax_response' );
+
+            if ( ! $response && $line_items ) {
+                $cache_key = $this->generate_cache_key( $line_items );
+                $response  = $this->get_cached_quote( $cache_key );
+            }
+        }
+
+        // Order meta fallback.
+        if ( ! $response ) {
+            $sovos_tax = $order->get_meta( '_sovos_tax', true );
+            if ( is_array( $sovos_tax ) && isset( $sovos_tax['response'] ) )
+                $response = $sovos_tax['response'];
+        }
+
+        return is_array( $response ) ? $response : false;
     }
 
     /**
