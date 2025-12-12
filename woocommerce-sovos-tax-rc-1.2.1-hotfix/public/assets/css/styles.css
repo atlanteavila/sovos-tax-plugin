@@ -1,0 +1,20 @@
+/*   Cart Page    */
+/*   Subtotal Table   */
+.subtotal-table {
+	width: 100%;
+  border-collapse: collapse;
+}
+.subtotal-table tr:not(:first-child) {
+  border-top: 1px solid rgba(0,0,0,.1);
+}
+table.subtotal-table[class*="subtotal-table"] tr td {
+  padding: .25em;
+  line-height: 1.15;
+  border: 0;
+}
+.subtotal-label {
+  width: 4.65em;
+  font-weight: bold;
+}
+/*   /Subtotal Table   */
+/*   /Cart Page    */

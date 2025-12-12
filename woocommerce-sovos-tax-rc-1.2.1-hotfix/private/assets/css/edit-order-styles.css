@@ -1,0 +1,119 @@
+/*   Sovos Tax Info Tooltip   */
+#woocommerce-order-items .inside {
+		overflow-x: auto;
+}
+#woocommerce-order-items .inside .woocommerce_order_items_wrapper {
+		overflow-x: initial;
+}
+
+.sovos-tax-tooltip {
+		position: relative;
+		display: inline-block;
+		border: 1px solid;
+		padding: .25em .5em;
+		line-height: 1;
+}
+.sovos-tax-tooltip .sovos-tax-tooltip-text {
+		visibility: hidden;
+		max-width: 25em;
+		top: -2.5em;
+		left: 100%;
+		padding-left: .5em;
+		position: absolute;
+		z-index: 1;
+		opacity: 0;
+		transition: opacity 0.3s;
+		width: 0;
+		height: 0;
+}
+.sovos-tax-tooltip table {
+		border-collapse: collapse;
+		background-color: rgba(0, 0, 0, 0.7);
+		backdrop-filter: blur(3px);
+		color: #fff;
+		text-align: center;
+		border-radius: .5em;
+		display:none;
+}
+.sovos-tax-tooltip:hover .sovos-tax-tooltip-text {
+		visibility: visible;
+		opacity: 1;
+		width: auto;
+		height: auto;
+}
+.sovos-tax-tooltip:hover table {
+	display: table;
+}
+#order_line_items .sovos-tax-tooltip tbody {
+  display: flex;
+}
+#order_line_items .sovos-tax-tooltip tr {
+  display: flex;
+  flex-direction: column;
+}
+.sovos-tax-tooltip tr > * {
+  flex: 1;
+	padding: .5em;
+}
+.sovos-tax-tooltip td {
+  text-align: left;
+}
+.sovos-tax-tooltip td:empty:before {
+  content: 'N/A';
+}
+#woocommerce-order-items .woocommerce_order_items_wrapper table.woocommerce_order_items .sovos-tax-tooltip td {
+		padding: .5em;
+		line-height: 1;
+		border: 1px solid;
+}
+/*   /Sovos Tax Info Tooltip   */
+
+/*   Sovos Tax ID Tooltip   */
+.woocommerce-help-tip.sovos-tooltip {
+	position: absolute;
+	top: 50%;
+	transform: translateY(-50%);
+	margin-left: .15em;
+}
+.total.tax-total {
+	position: relative;
+}
+.sovos-toast {
+	position: fixed;
+	bottom: 2rem;
+	left: 50%;
+	transform: translate3d(-50%, 0, 0);
+	font-size: 1.2rem;
+	font-weight: bold;
+	padding: .5em 1em;
+	background-color: rgba(51, 51, 51, 0.9);
+	color: rgb(255, 255, 255);
+	border-radius: .25em;
+	z-index: 9999;
+	backface-visibility: hidden;
+}
+
+/*   Order Notes Tooltip   */
+#woocommerce-order-notes .sovos-tax-tooltip th,
+#woocommerce-order-notes .sovos-tax-tooltip td {
+  border: 1px solid white;
+}
+#woocommerce-order-notes .sovos-tooltip-text {
+  position: absolute;
+  right: 0;
+  padding-top: 0.5em;
+  z-index: 1;
+	max-height: 34.5em;
+	overflow: auto;
+}
+#woocommerce-order-notes .sovos-tax-tooltip {
+	text-align: center;
+  background-color: rgba(255, 255, 255, 0.75);
+}
+#woocommerce-order-notes .sovos-tax-tooltip table {
+  width: 20em;
+  max-width: 100vw;
+}
+/*   /Order Notes Tooltip   */
+
+/*   /Sovos Tax ID Tooltip   */
