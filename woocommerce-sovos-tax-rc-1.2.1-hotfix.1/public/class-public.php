@@ -803,9 +803,18 @@ class Woo_Sovos_Public {
     /**
      * Retrieve the cached quote from the Woo session.
      */
-    protected function get_cached_quote_from_session() {
-        $session = $this->get_wc_session();
-        $response = $session ? $session->get( 'sovos_tax_response' ) : false;
+    protected function get_cached_quote_from_session( $line_items = null ) {
+        $session  = $this->get_wc_session();
+        $response = false;
+
+        if ( $session && is_array( $line_items ) ) {
+            $cache_key = $this->generate_cache_key( $line_items );
+            $response  = $session->get( "sovos_quote_$cache_key" );
+        }
+
+        if ( ! $response && $session ) {
+            $response = $session->get( 'sovos_tax_response' );
+        }
 
         return $this->is_valid_quote_response( $response ) ? $response : false;
     }
@@ -843,7 +852,7 @@ class Woo_Sovos_Public {
         $response = $this->get_cached_quote_from_order( $order );
 
         if ( ! $response )
-            $response = $this->get_cached_quote_from_session();
+            $response = $this->get_cached_quote_from_session( $line_items );
 
         if ( ! $response )
             $response = $this->quote_tax( $line_items );
@@ -1190,7 +1199,7 @@ class Woo_Sovos_Public {
 
         // Pull from cached quote if none was provided.
         if ( ! $response ) {
-            $response = $this->get_cached_quote_from_session();
+            $response = $this->get_cached_quote_from_session( $line_items );
         }
 
         if ( ! $this->is_valid_quote_response( $response ) )
@@ -2843,18 +2852,86 @@ class Woo_Sovos_Public {
      */
     protected function generate_cache_key( array $line_items ): string {
         $address = $this->set_to_address();           // already returns a trimmed array
+        $cart    = $this->get_cart();
+        $session = $this->get_wc_session();
+
+        $shipping_methods = [];
+        if ( $session ) {
+            $chosen_methods = $session->get( 'chosen_shipping_methods' );
+            if ( is_array( $chosen_methods ) ) {
+                $shipping_methods = array_values( array_filter( $chosen_methods ) );
+            }
+        }
+
+        $coupons          = [];
+        $coupon_totals    = [];
+        $fees             = [];
+        $cart_hash        = null;
+        $line_tax_classes = [];
+
+        if ( $cart ) {
+            $cart_hash     = $cart->get_cart_hash();
+            $coupons       = array_values( $cart->get_applied_coupons() );
+            $coupon_totals = array_filter( $cart->get_coupon_discount_totals() );
+
+            foreach ( $cart->get_fees() as $fee ) {
+                $fees[] = [
+                    'id'        => isset( $fee->id ) ? $fee->id : $fee->name,
+                    'name'      => $fee->name,
+                    'amount'    => $fee->amount,
+                    'total'     => isset( $fee->total ) ? $fee->total : null,
+                    'taxable'   => $fee->taxable,
+                    'tax_class' => $fee->tax_class,
+                ];
+            }
+        }
+
+        $customer_roles = [];
+        $customer       = function_exists( 'WC' ) && WC()->customer ? WC()->customer : null;
+
+        if ( is_user_logged_in() ) {
+            $user           = wp_get_current_user();
+            $customer_roles = (array) $user->roles;
+        }
+
+        $tax_class_markers = [
+            'session_original_tax_class' => $session ? $session->get( 'original_tax_class' ) : null,
+            'using_original_tax_class'   => $session ? $session->get( 'use_original_tax_class' ) : null,
+            'customer_tax_class'         => ( $customer && method_exists( $customer, 'get_tax_class' ) ) ? $customer->get_tax_class() : null,
+            'customer_vat_exempt'        => ( $customer && method_exists( $customer, 'get_is_vat_exempt' ) ) ? $customer->get_is_vat_exempt() : null,
+        ];
+
+        $line_items_payload = array_map(
+            static function ( $item ) use ( &$line_tax_classes ) {
+                $product_id = is_array( $item ) ? $item['data']->get_id() : $item->get_product_id();
+                $quantity   = is_array( $item ) ? $item['quantity']       : $item->get_quantity();
+                $tax_class  = is_array( $item ) ? $item['data']->get_tax_class() : $item->get_tax_class();
+
+                $line_tax_classes[] = $tax_class;
+
+                return [
+                    'id'        => $product_id,
+                    'qty'       => $quantity,
+                    'tax_class' => $tax_class,
+                    // remove 'tot' — line_total mutates after taxes, causing hash churn
+                ];
+            },
+            $line_items
+        );
+
         $payload = [
-            'addr' => $address,
-            'cart' => array_map(
-                static function ( $item ) {
-                    return [
-                        'id'  => is_array( $item ) ? $item['data']->get_id() : $item->get_product_id(),
-                        'qty' => is_array( $item ) ? $item['quantity']       : $item->get_quantity(),
-                        // remove 'tot' — line_total mutates after taxes, causing hash churn
-                    ];
-                },
-                $line_items
-            ),
+            'addr'          => $address,
+            'cart'          => $line_items_payload,
+            'cart_hash'     => $cart_hash,
+            'shipping'      => $shipping_methods,
+            'coupons'       => $coupons,
+            'coupon_totals' => $coupon_totals,
+            'fees'          => $fees,
+            'customer'      => [
+                'roles'       => $customer_roles,
+                'tax_markers' => $tax_class_markers,
+            ],
+            'line_classes'  => $line_tax_classes,
         ];
 
         return md5( wp_json_encode( $payload ) );     // 32‑char cache key
