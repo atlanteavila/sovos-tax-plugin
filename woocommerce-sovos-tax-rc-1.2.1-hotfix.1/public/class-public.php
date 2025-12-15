@@ -2319,7 +2319,7 @@ class Woo_Sovos_Public {
                 continue;
             }
 
-            $$sig = implode('|', [
+            $sig = implode('|', [
                 $tax_rate['tax_rate_country'] ?? '',
                 $tax_rate['tax_rate_state'] ?? '',
                 number_format((float) ($tax_rate['tax_rate'] ?? 0), 4),
@@ -2870,22 +2870,17 @@ class Woo_Sovos_Public {
         }
 
         $coupons          = [];
-        $coupon_totals    = [];
         $fees             = [];
-        $cart_hash        = null;
         $line_tax_classes = [];
 
         if ( $cart ) {
-            $cart_hash     = $cart->get_cart_hash();
-            $coupons       = array_values( $cart->get_applied_coupons() );
-            $coupon_totals = array_filter( $cart->get_coupon_discount_totals() );
+            $coupons = array_values( $cart->get_applied_coupons() );
 
             foreach ( $cart->get_fees() as $fee ) {
                 $fees[] = [
                     'id'        => isset( $fee->id ) ? $fee->id : $fee->name,
                     'name'      => $fee->name,
                     'amount'    => $fee->amount,
-                    'total'     => isset( $fee->total ) ? $fee->total : null,
                     'taxable'   => $fee->taxable,
                     'tax_class' => $fee->tax_class,
                 ];
@@ -2928,10 +2923,8 @@ class Woo_Sovos_Public {
         $payload = [
             'addr'          => $address,
             'cart'          => $line_items_payload,
-            'cart_hash'     => $cart_hash,
             'shipping'      => $shipping_methods,
             'coupons'       => $coupons,
-            'coupon_totals' => $coupon_totals,
             'fees'          => $fees,
             'customer'      => [
                 'roles'       => $customer_roles,
