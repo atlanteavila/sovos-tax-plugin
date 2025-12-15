@@ -801,6 +801,64 @@ class Woo_Sovos_Public {
     }
 
     /**
+     * Retrieve the cached quote from the Woo session.
+     */
+    protected function get_cached_quote_from_session() {
+        $session = $this->get_wc_session();
+        $response = $session ? $session->get( 'sovos_tax_response' ) : false;
+
+        return $this->is_valid_quote_response( $response ) ? $response : false;
+    }
+
+    /**
+     * Retrieve a persisted quote from the order meta.
+     */
+    protected function get_cached_quote_from_order( $order ) {
+        if ( ! $order || ! $order instanceof \WC_Order )
+            return false;
+
+        $response = $order->get_meta( '_sovos_tax_response', true );
+
+        return $this->is_valid_quote_response( $response ) ? $response : false;
+    }
+
+    /**
+     * Persist a successful quote onto the order for re-use.
+     */
+    protected function persist_quote_on_order( $order, $response ): void {
+        if ( ! $order || ! $order instanceof \WC_Order )
+            return;
+
+        if ( ! $this->is_valid_quote_response( $response ) )
+            return;
+
+        $order->update_meta_data( '_sovos_tax_response', $response );
+        $order->save_meta_data();
+    }
+
+    /**
+     * Shared access point for a Sovos quote, preferring cached data.
+     */
+    protected function get_or_create_shared_quote( $line_items, $order = null ) {
+        $response = $this->get_cached_quote_from_order( $order );
+
+        if ( ! $response )
+            $response = $this->get_cached_quote_from_session();
+
+        if ( ! $response )
+            $response = $this->quote_tax( $line_items );
+
+        return $this->is_valid_quote_response( $response ) ? $response : false;
+    }
+
+    /**
+     * Validate the structure of a Sovos quote response.
+     */
+    protected function is_valid_quote_response( $response ): bool {
+        return is_array( $response ) && ! empty( $response['success'] ) && isset( $response['data'] );
+    }
+
+    /**
      * Quote (estimate) tax for the current cart / order lines.
      *
      * Adds a simple Woo‑session cache so we don’t hammer Sovos with
@@ -1130,6 +1188,14 @@ class Woo_Sovos_Public {
     public function construct_sovos_tax_order_data( $response, $line_items = null ) {
         $sovos_tax = false;
 
+        // Pull from cached quote if none was provided.
+        if ( ! $response ) {
+            $response = $this->get_cached_quote_from_session();
+        }
+
+        if ( ! $this->is_valid_quote_response( $response ) )
+            return $sovos_tax;
+
         // Check if the response is valid
         if (
             ! $response['success'] ||
@@ -1267,7 +1333,11 @@ class Woo_Sovos_Public {
             return;
 
         $order_items = $order->get_items();
-        $response    = $this->quote_tax( $order_items );
+        $response    = $this->get_or_create_shared_quote( $order_items, $order );
+
+        // Persist the cached quote for later hooks.
+        if ( $response )
+            $this->persist_quote_on_order( $order, $response );
 
         // Construct the _sovos_tax data
         // $this->construct_sovos_tax_items_data( $response, $order_items );
@@ -1306,7 +1376,21 @@ class Woo_Sovos_Public {
             return;
 
         $order_items = $order->get_items();
-        $response    = $this->calculate_tax( $order_items, $order_id );
+        $response    = $this->get_cached_quote_from_order( $order );
+
+        if ( ! $response )
+            $response = $this->get_cached_quote_from_session();
+
+        // If we lack a cached txwTrnDocId, fall back to a fresh Sovos call.
+        if ( ! $response || ! isset( $response['data']['txwTrnDocId'] ) )
+            $response = $this->calculate_tax( $order_items, $order_id );
+
+        // Nothing to do if we still don't have a response.
+        if ( ! $response )
+            return;
+
+        // Persist the response for future hooks.
+        $this->persist_quote_on_order( $order, $response );
 
         // Check if the response is valid.
         if ( $response['success'] && isset( $response['data']['txwTrnDocId'] ) ) :
@@ -1370,6 +1454,9 @@ class Woo_Sovos_Public {
      * @since 1.2.0
      */
     public function add_sovos_order_notes( $order, $response ) {
+        if ( ! $this->is_valid_quote_response( $response ) )
+            return;
+
         $empty = true;
         ob_start();
         ?>
@@ -1703,56 +1790,122 @@ class Woo_Sovos_Public {
      * @return int New or existing tax_rate_id
      */
     public function insert_tax_rate( $tax_rate ) {
-    // Never accept a caller-provided primary key
-    if ( isset( $tax_rate['tax_rate_id'] ) ) {
-        unset( $tax_rate['tax_rate_id'] );
+        // Never accept a caller-provided primary key
+        if ( isset( $tax_rate['tax_rate_id'] ) ) {
+            unset( $tax_rate['tax_rate_id'] );
+        }
+
+        // 🔒 Normalize so identical jurisdictions reuse ONE row
+        $tax_rate['tax_rate_class'] = '';                // Standard class only
+        $tax_rate['tax_rate_name']  = 'Sovos Combined';  // <- constant label, not per-jurisdiction
+
+        // Provide safe defaults
+        if ( ! isset( $tax_rate['tax_rate_postcode'] ) ) $tax_rate['tax_rate_postcode'] = '';
+        if ( ! isset( $tax_rate['tax_rate_city'] ) )     $tax_rate['tax_rate_city']     = '';
+        if ( ! isset( $tax_rate['tax_rate_priority'] ) ) $tax_rate['tax_rate_priority'] = 1;
+        if ( ! isset( $tax_rate['tax_rate_order'] ) )    $tax_rate['tax_rate_order']    = 1;
+
+        // Normalize types
+        $tax_rate['tax_rate']          = isset( $tax_rate['tax_rate'] ) ? (float) $tax_rate['tax_rate'] : 0.0;
+        $tax_rate['tax_rate_compound'] = empty( $tax_rate['tax_rate_compound'] ) ? 0 : 1;
+        $tax_rate['tax_rate_shipping'] = empty( $tax_rate['tax_rate_shipping'] ) ? 0 : 1;
+
+        // Reuse identical rate if it already exists
+        $existing_tax_rate_id = $this->get_existing_tax_rate( $tax_rate ); // you can keep your current query
+        if ( $existing_tax_rate_id ) {
+            return (int) $existing_tax_rate_id;
+        }
+
+        global $wpdb;
+        $table_name  = $wpdb->prefix . 'woocommerce_tax_rates';
+        $columns     = $this->get_tax_rate_table_columns( $table_name );
+        $has_legacy_schema = ! in_array( 'tax_rate_postcode', $columns, true ) || ! in_array( 'tax_rate_city', $columns, true );
+
+        // Prefer Woo helper if the schema supports the expected columns
+        if ( ! $has_legacy_schema && method_exists( '\WC_Tax', '_insert_tax_rate' ) ) {
+            return (int) \WC_Tax::_insert_tax_rate( $tax_rate );
+        }
+
+        // Legacy / custom schemas: build an insert using only available columns.
+        $row     = [];
+        $formats = [];
+
+        $row['tax_rate_country']  = strtoupper( (string) ( $tax_rate['tax_rate_country'] ?? '' ) );
+        $formats[] = '%s';
+
+        if ( in_array( 'tax_rate_state', $columns, true ) ) {
+            $row['tax_rate_state'] = strtoupper( (string) ( $tax_rate['tax_rate_state'] ?? '' ) );
+            $formats[] = '%s';
+        }
+
+        $row['tax_rate']          = wc_format_decimal( (float) ( $tax_rate['tax_rate'] ?? 0 ), 4 );
+        $formats[] = '%s';
+
+        $row['tax_rate_name']     = substr( (string) ( $tax_rate['tax_rate_name'] ?? 'Sovos Combined' ), 0, 200 );
+        $formats[] = '%s';
+
+        $row['tax_rate_priority'] = (int) ( $tax_rate['tax_rate_priority'] ?? 1 );
+        $formats[] = '%d';
+
+        $row['tax_rate_compound'] = (int) ( $tax_rate['tax_rate_compound'] ?? 0 );
+        $formats[] = '%d';
+
+        $row['tax_rate_shipping'] = (int) ( $tax_rate['tax_rate_shipping'] ?? 0 );
+        $formats[] = '%d';
+
+        if ( in_array( 'tax_rate_order', $columns, true ) ) {
+            $row['tax_rate_order'] = (int) ( $tax_rate['tax_rate_order'] ?? 1 );
+            $formats[] = '%d';
+        }
+
+        $row['tax_rate_class']    = (string) ( $tax_rate['tax_rate_class'] ?? '' );
+        $formats[] = '%s';
+
+        if ( in_array( 'tax_rate_postcode', $columns, true ) ) {
+            $row['tax_rate_postcode'] = (string) ( $tax_rate['tax_rate_postcode'] ?? '' );
+            $formats[] = '%s';
+        }
+
+        if ( in_array( 'tax_rate_city', $columns, true ) ) {
+            $row['tax_rate_city'] = (string) ( $tax_rate['tax_rate_city'] ?? '' );
+            $formats[] = '%s';
+        }
+
+        $wpdb->insert( $table_name, $row, $formats );
+        $new_id = (int) $wpdb->insert_id;
+        if ( $new_id ) {
+            do_action( 'woocommerce_tax_rate_added', $new_id, $tax_rate );
+        }
+
+        return $new_id;
     }
 
-    // 🔒 Normalize so identical jurisdictions reuse ONE row
-    $tax_rate['tax_rate_class'] = '';                // Standard class only
-    $tax_rate['tax_rate_name']  = 'Sovos Combined';  // <- constant label, not per-jurisdiction
+    /**
+     * Describe the schema for the Woo tax rates table (cached).
+     */
+    protected function get_tax_rate_table_columns( $table_name ) {
+        static $columns_cache = [];
 
-    // Provide safe defaults
-    if ( ! isset( $tax_rate['tax_rate_postcode'] ) ) $tax_rate['tax_rate_postcode'] = '';
-    if ( ! isset( $tax_rate['tax_rate_city'] ) )     $tax_rate['tax_rate_city']     = '';
-    if ( ! isset( $tax_rate['tax_rate_priority'] ) ) $tax_rate['tax_rate_priority'] = 1;
-    if ( ! isset( $tax_rate['tax_rate_order'] ) )    $tax_rate['tax_rate_order']    = 1;
+        if ( isset( $columns_cache[ $table_name ] ) ) {
+            return $columns_cache[ $table_name ];
+        }
 
-    // Normalize types
-    $tax_rate['tax_rate']          = isset( $tax_rate['tax_rate'] ) ? (float) $tax_rate['tax_rate'] : 0.0;
-    $tax_rate['tax_rate_compound'] = empty( $tax_rate['tax_rate_compound'] ) ? 0 : 1;
-    $tax_rate['tax_rate_shipping'] = empty( $tax_rate['tax_rate_shipping'] ) ? 0 : 1;
+        global $wpdb;
+        $columns = [];
+        $results = $wpdb->get_results( "SHOW COLUMNS FROM {$table_name}" );
 
-    // Reuse identical rate if it already exists
-    $existing_tax_rate_id = $this->get_existing_tax_rate( $tax_rate ); // you can keep your current query
-    if ( $existing_tax_rate_id ) {
-        return (int) $existing_tax_rate_id;
+        if ( is_array( $results ) ) {
+            foreach ( $results as $column ) {
+                if ( isset( $column->Field ) ) {
+                    $columns[] = $column->Field;
+                }
+            }
+        }
+
+        $columns_cache[ $table_name ] = $columns;
+
+        return $columns;
     }
-
-    // Prefer Woo helper if available, otherwise insert directly
-    if ( method_exists( '\WC_Tax', '_insert_tax_rate' ) ) {
-        return (int) \WC_Tax::_insert_tax_rate( $tax_rate );
-    }
-
-    global $wpdb;
-    $row = array(
-        'tax_rate_country'  => strtoupper( (string) ( $tax_rate['tax_rate_country'] ?? '' ) ),
-        'tax_rate_state'    => strtoupper( (string) ( $tax_rate['tax_rate_state'] ?? '' ) ),
-        'tax_rate'          => wc_format_decimal( (float) ( $tax_rate['tax_rate'] ?? 0 ), 4 ),
-        'tax_rate_name'     => substr( (string) ( $tax_rate['tax_rate_name'] ?? 'Sovos Combined' ), 0, 200 ),
-        'tax_rate_priority' => (int) ( $tax_rate['tax_rate_priority'] ?? 1 ),
-        'tax_rate_compound' => (int) ( $tax_rate['tax_rate_compound'] ?? 0 ),
-        'tax_rate_shipping' => (int) ( $tax_rate['tax_rate_shipping'] ?? 0 ),
-        'tax_rate_order'    => (int) ( $tax_rate['tax_rate_order'] ?? 1 ),
-        'tax_rate_class'    => (string) ( $tax_rate['tax_rate_class'] ?? '' ),
-    );
-    $wpdb->insert( $wpdb->prefix . 'woocommerce_tax_rates', $row, array('%s','%s','%s','%s','%d','%d','%d','%d','%s') );
-    $new_id = (int) $wpdb->insert_id;
-    if ( $new_id ) {
-        do_action( 'woocommerce_tax_rate_added', $new_id, $tax_rate );
-    }
-    return $new_id;
-}
 
 
     /**
@@ -2105,8 +2258,18 @@ class Woo_Sovos_Public {
             return $matched_tax_rates;
         }
 
-        // Quote Sovos
-        $response = $this->quote_tax($line_items);
+        // Quote Sovos using shared cache (session/order)
+        $response = $this->get_or_create_shared_quote($line_items, $order);
+
+        if ( ! $response ) {
+            $log('EARLY RETURN: missing sovos response');
+            return $matched_tax_rates;
+        }
+
+        // Persist the quote for order contexts so later hooks can reuse it.
+        if ($order && $response) {
+            $this->persist_quote_on_order($order, $response);
+        }
 
         $success = !empty($response['success']);
         $ln_count = isset($response['data']['lnRslts']) && is_array($response['data']['lnRslts']) ? count($response['data']['lnRslts']) : 0;
@@ -2742,6 +2905,12 @@ class Woo_Sovos_Public {
         // Skip REST-created orders as in your other logic
         if ($this->is_order_created_via_rest($order)) {
             return;
+        }
+
+        // Persist any cached quote from the checkout session onto the order.
+        $session_quote = $this->get_cached_quote_from_session();
+        if ($session_quote) {
+            $this->persist_quote_on_order($order, $session_quote);
         }
         // Let Woo build order-level tax items from the per-line arrays we just set.
         $order->calculate_taxes();
