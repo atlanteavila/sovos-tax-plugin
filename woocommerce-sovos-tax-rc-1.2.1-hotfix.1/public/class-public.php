@@ -805,16 +805,18 @@ class Woo_Sovos_Public {
      */
     protected function get_cached_quote_from_session( $line_items = null ) {
         $session  = $this->get_wc_session();
-        $response = false;
+        if ( ! $session ) {
+            return false;
+        }
 
-        if ( $session && is_array( $line_items ) ) {
+        if ( is_array( $line_items ) ) {
             $cache_key = $this->generate_cache_key( $line_items );
             $response  = $session->get( "sovos_quote_$cache_key" );
+
+            return $this->is_valid_quote_response( $response ) ? $response : false;
         }
 
-        if ( ! $response && $session ) {
-            $response = $session->get( 'sovos_tax_response' );
-        }
+        $response = $session->get( 'sovos_tax_response' );
 
         return $this->is_valid_quote_response( $response ) ? $response : false;
     }
