@@ -793,6 +793,10 @@ class Woo_Sovos_Public {
     public function store_response_in_session( $response ) {
 
         // Get the WooCommerce session
+        if ( ! $this->is_valid_quote_response( $response ) ) {
+            return;
+        }
+
         $session = $this->get_wc_session();
         if ( ! $session )
             return;
@@ -2942,10 +2946,16 @@ class Woo_Sovos_Public {
     /** Read / write helpers around WC()->session */
     protected function get_cached_quote( string $key ) {
         $session = $this->get_wc_session();
-        return $session ? $session->get( "sovos_quote_$key" ) : false;
+        $response = $session ? $session->get( "sovos_quote_$key" ) : false;
+
+        return $this->is_valid_quote_response( $response ) ? $response : false;
     }
 
     protected function set_cached_quote( string $key, array $response ): void {
+        if ( ! $this->is_valid_quote_response( $response ) ) {
+            return;
+        }
+
         $session = $this->get_wc_session();
         if ( $session ) {
             $session->set( "sovos_quote_$key", $response );
