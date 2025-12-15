@@ -1790,56 +1790,122 @@ class Woo_Sovos_Public {
      * @return int New or existing tax_rate_id
      */
     public function insert_tax_rate( $tax_rate ) {
-    // Never accept a caller-provided primary key
-    if ( isset( $tax_rate['tax_rate_id'] ) ) {
-        unset( $tax_rate['tax_rate_id'] );
+        // Never accept a caller-provided primary key
+        if ( isset( $tax_rate['tax_rate_id'] ) ) {
+            unset( $tax_rate['tax_rate_id'] );
+        }
+
+        // 🔒 Normalize so identical jurisdictions reuse ONE row
+        $tax_rate['tax_rate_class'] = '';                // Standard class only
+        $tax_rate['tax_rate_name']  = 'Sovos Combined';  // <- constant label, not per-jurisdiction
+
+        // Provide safe defaults
+        if ( ! isset( $tax_rate['tax_rate_postcode'] ) ) $tax_rate['tax_rate_postcode'] = '';
+        if ( ! isset( $tax_rate['tax_rate_city'] ) )     $tax_rate['tax_rate_city']     = '';
+        if ( ! isset( $tax_rate['tax_rate_priority'] ) ) $tax_rate['tax_rate_priority'] = 1;
+        if ( ! isset( $tax_rate['tax_rate_order'] ) )    $tax_rate['tax_rate_order']    = 1;
+
+        // Normalize types
+        $tax_rate['tax_rate']          = isset( $tax_rate['tax_rate'] ) ? (float) $tax_rate['tax_rate'] : 0.0;
+        $tax_rate['tax_rate_compound'] = empty( $tax_rate['tax_rate_compound'] ) ? 0 : 1;
+        $tax_rate['tax_rate_shipping'] = empty( $tax_rate['tax_rate_shipping'] ) ? 0 : 1;
+
+        // Reuse identical rate if it already exists
+        $existing_tax_rate_id = $this->get_existing_tax_rate( $tax_rate ); // you can keep your current query
+        if ( $existing_tax_rate_id ) {
+            return (int) $existing_tax_rate_id;
+        }
+
+        global $wpdb;
+        $table_name  = $wpdb->prefix . 'woocommerce_tax_rates';
+        $columns     = $this->get_tax_rate_table_columns( $table_name );
+        $has_legacy_schema = ! in_array( 'tax_rate_postcode', $columns, true ) || ! in_array( 'tax_rate_city', $columns, true );
+
+        // Prefer Woo helper if the schema supports the expected columns
+        if ( ! $has_legacy_schema && method_exists( '\WC_Tax', '_insert_tax_rate' ) ) {
+            return (int) \WC_Tax::_insert_tax_rate( $tax_rate );
+        }
+
+        // Legacy / custom schemas: build an insert using only available columns.
+        $row     = [];
+        $formats = [];
+
+        $row['tax_rate_country']  = strtoupper( (string) ( $tax_rate['tax_rate_country'] ?? '' ) );
+        $formats[] = '%s';
+
+        if ( in_array( 'tax_rate_state', $columns, true ) ) {
+            $row['tax_rate_state'] = strtoupper( (string) ( $tax_rate['tax_rate_state'] ?? '' ) );
+            $formats[] = '%s';
+        }
+
+        $row['tax_rate']          = wc_format_decimal( (float) ( $tax_rate['tax_rate'] ?? 0 ), 4 );
+        $formats[] = '%s';
+
+        $row['tax_rate_name']     = substr( (string) ( $tax_rate['tax_rate_name'] ?? 'Sovos Combined' ), 0, 200 );
+        $formats[] = '%s';
+
+        $row['tax_rate_priority'] = (int) ( $tax_rate['tax_rate_priority'] ?? 1 );
+        $formats[] = '%d';
+
+        $row['tax_rate_compound'] = (int) ( $tax_rate['tax_rate_compound'] ?? 0 );
+        $formats[] = '%d';
+
+        $row['tax_rate_shipping'] = (int) ( $tax_rate['tax_rate_shipping'] ?? 0 );
+        $formats[] = '%d';
+
+        if ( in_array( 'tax_rate_order', $columns, true ) ) {
+            $row['tax_rate_order'] = (int) ( $tax_rate['tax_rate_order'] ?? 1 );
+            $formats[] = '%d';
+        }
+
+        $row['tax_rate_class']    = (string) ( $tax_rate['tax_rate_class'] ?? '' );
+        $formats[] = '%s';
+
+        if ( in_array( 'tax_rate_postcode', $columns, true ) ) {
+            $row['tax_rate_postcode'] = (string) ( $tax_rate['tax_rate_postcode'] ?? '' );
+            $formats[] = '%s';
+        }
+
+        if ( in_array( 'tax_rate_city', $columns, true ) ) {
+            $row['tax_rate_city'] = (string) ( $tax_rate['tax_rate_city'] ?? '' );
+            $formats[] = '%s';
+        }
+
+        $wpdb->insert( $table_name, $row, $formats );
+        $new_id = (int) $wpdb->insert_id;
+        if ( $new_id ) {
+            do_action( 'woocommerce_tax_rate_added', $new_id, $tax_rate );
+        }
+
+        return $new_id;
     }
 
-    // 🔒 Normalize so identical jurisdictions reuse ONE row
-    $tax_rate['tax_rate_class'] = '';                // Standard class only
-    $tax_rate['tax_rate_name']  = 'Sovos Combined';  // <- constant label, not per-jurisdiction
+    /**
+     * Describe the schema for the Woo tax rates table (cached).
+     */
+    protected function get_tax_rate_table_columns( $table_name ) {
+        static $columns_cache = [];
 
-    // Provide safe defaults
-    if ( ! isset( $tax_rate['tax_rate_postcode'] ) ) $tax_rate['tax_rate_postcode'] = '';
-    if ( ! isset( $tax_rate['tax_rate_city'] ) )     $tax_rate['tax_rate_city']     = '';
-    if ( ! isset( $tax_rate['tax_rate_priority'] ) ) $tax_rate['tax_rate_priority'] = 1;
-    if ( ! isset( $tax_rate['tax_rate_order'] ) )    $tax_rate['tax_rate_order']    = 1;
+        if ( isset( $columns_cache[ $table_name ] ) ) {
+            return $columns_cache[ $table_name ];
+        }
 
-    // Normalize types
-    $tax_rate['tax_rate']          = isset( $tax_rate['tax_rate'] ) ? (float) $tax_rate['tax_rate'] : 0.0;
-    $tax_rate['tax_rate_compound'] = empty( $tax_rate['tax_rate_compound'] ) ? 0 : 1;
-    $tax_rate['tax_rate_shipping'] = empty( $tax_rate['tax_rate_shipping'] ) ? 0 : 1;
+        global $wpdb;
+        $columns = [];
+        $results = $wpdb->get_results( "SHOW COLUMNS FROM {$table_name}" );
 
-    // Reuse identical rate if it already exists
-    $existing_tax_rate_id = $this->get_existing_tax_rate( $tax_rate ); // you can keep your current query
-    if ( $existing_tax_rate_id ) {
-        return (int) $existing_tax_rate_id;
+        if ( is_array( $results ) ) {
+            foreach ( $results as $column ) {
+                if ( isset( $column->Field ) ) {
+                    $columns[] = $column->Field;
+                }
+            }
+        }
+
+        $columns_cache[ $table_name ] = $columns;
+
+        return $columns;
     }
-
-    // Prefer Woo helper if available, otherwise insert directly
-    if ( method_exists( '\WC_Tax', '_insert_tax_rate' ) ) {
-        return (int) \WC_Tax::_insert_tax_rate( $tax_rate );
-    }
-
-    global $wpdb;
-    $row = array(
-        'tax_rate_country'  => strtoupper( (string) ( $tax_rate['tax_rate_country'] ?? '' ) ),
-        'tax_rate_state'    => strtoupper( (string) ( $tax_rate['tax_rate_state'] ?? '' ) ),
-        'tax_rate'          => wc_format_decimal( (float) ( $tax_rate['tax_rate'] ?? 0 ), 4 ),
-        'tax_rate_name'     => substr( (string) ( $tax_rate['tax_rate_name'] ?? 'Sovos Combined' ), 0, 200 ),
-        'tax_rate_priority' => (int) ( $tax_rate['tax_rate_priority'] ?? 1 ),
-        'tax_rate_compound' => (int) ( $tax_rate['tax_rate_compound'] ?? 0 ),
-        'tax_rate_shipping' => (int) ( $tax_rate['tax_rate_shipping'] ?? 0 ),
-        'tax_rate_order'    => (int) ( $tax_rate['tax_rate_order'] ?? 1 ),
-        'tax_rate_class'    => (string) ( $tax_rate['tax_rate_class'] ?? '' ),
-    );
-    $wpdb->insert( $wpdb->prefix . 'woocommerce_tax_rates', $row, array('%s','%s','%s','%s','%d','%d','%d','%d','%s') );
-    $new_id = (int) $wpdb->insert_id;
-    if ( $new_id ) {
-        do_action( 'woocommerce_tax_rate_added', $new_id, $tax_rate );
-    }
-    return $new_id;
-}
 
 
     /**
