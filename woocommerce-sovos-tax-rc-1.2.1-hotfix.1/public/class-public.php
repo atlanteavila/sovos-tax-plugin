@@ -801,6 +801,64 @@ class Woo_Sovos_Public {
     }
 
     /**
+     * Retrieve the cached quote from the Woo session.
+     */
+    protected function get_cached_quote_from_session() {
+        $session = $this->get_wc_session();
+        $response = $session ? $session->get( 'sovos_tax_response' ) : false;
+
+        return $this->is_valid_quote_response( $response ) ? $response : false;
+    }
+
+    /**
+     * Retrieve a persisted quote from the order meta.
+     */
+    protected function get_cached_quote_from_order( $order ) {
+        if ( ! $order || ! $order instanceof \WC_Order )
+            return false;
+
+        $response = $order->get_meta( '_sovos_tax_response', true );
+
+        return $this->is_valid_quote_response( $response ) ? $response : false;
+    }
+
+    /**
+     * Persist a successful quote onto the order for re-use.
+     */
+    protected function persist_quote_on_order( $order, $response ): void {
+        if ( ! $order || ! $order instanceof \WC_Order )
+            return;
+
+        if ( ! $this->is_valid_quote_response( $response ) )
+            return;
+
+        $order->update_meta_data( '_sovos_tax_response', $response );
+        $order->save_meta_data();
+    }
+
+    /**
+     * Shared access point for a Sovos quote, preferring cached data.
+     */
+    protected function get_or_create_shared_quote( $line_items, $order = null ) {
+        $response = $this->get_cached_quote_from_order( $order );
+
+        if ( ! $response )
+            $response = $this->get_cached_quote_from_session();
+
+        if ( ! $response )
+            $response = $this->quote_tax( $line_items );
+
+        return $this->is_valid_quote_response( $response ) ? $response : false;
+    }
+
+    /**
+     * Validate the structure of a Sovos quote response.
+     */
+    protected function is_valid_quote_response( $response ): bool {
+        return is_array( $response ) && ! empty( $response['success'] ) && isset( $response['data'] );
+    }
+
+    /**
      * Quote (estimate) tax for the current cart / order lines.
      *
      * Adds a simple Woo‑session cache so we don’t hammer Sovos with
@@ -1130,6 +1188,14 @@ class Woo_Sovos_Public {
     public function construct_sovos_tax_order_data( $response, $line_items = null ) {
         $sovos_tax = false;
 
+        // Pull from cached quote if none was provided.
+        if ( ! $response ) {
+            $response = $this->get_cached_quote_from_session();
+        }
+
+        if ( ! $this->is_valid_quote_response( $response ) )
+            return $sovos_tax;
+
         // Check if the response is valid
         if (
             ! $response['success'] ||
@@ -1267,7 +1333,11 @@ class Woo_Sovos_Public {
             return;
 
         $order_items = $order->get_items();
-        $response    = $this->quote_tax( $order_items );
+        $response    = $this->get_or_create_shared_quote( $order_items, $order );
+
+        // Persist the cached quote for later hooks.
+        if ( $response )
+            $this->persist_quote_on_order( $order, $response );
 
         // Construct the _sovos_tax data
         // $this->construct_sovos_tax_items_data( $response, $order_items );
@@ -1306,7 +1376,21 @@ class Woo_Sovos_Public {
             return;
 
         $order_items = $order->get_items();
-        $response    = $this->calculate_tax( $order_items, $order_id );
+        $response    = $this->get_cached_quote_from_order( $order );
+
+        if ( ! $response )
+            $response = $this->get_cached_quote_from_session();
+
+        // If we lack a cached txwTrnDocId, fall back to a fresh Sovos call.
+        if ( ! $response || ! isset( $response['data']['txwTrnDocId'] ) )
+            $response = $this->calculate_tax( $order_items, $order_id );
+
+        // Nothing to do if we still don't have a response.
+        if ( ! $response )
+            return;
+
+        // Persist the response for future hooks.
+        $this->persist_quote_on_order( $order, $response );
 
         // Check if the response is valid.
         if ( $response['success'] && isset( $response['data']['txwTrnDocId'] ) ) :
@@ -1370,6 +1454,9 @@ class Woo_Sovos_Public {
      * @since 1.2.0
      */
     public function add_sovos_order_notes( $order, $response ) {
+        if ( ! $this->is_valid_quote_response( $response ) )
+            return;
+
         $empty = true;
         ob_start();
         ?>
@@ -2105,8 +2192,18 @@ class Woo_Sovos_Public {
             return $matched_tax_rates;
         }
 
-        // Quote Sovos
-        $response = $this->quote_tax($line_items);
+        // Quote Sovos using shared cache (session/order)
+        $response = $this->get_or_create_shared_quote($line_items, $order);
+
+        if ( ! $response ) {
+            $log('EARLY RETURN: missing sovos response');
+            return $matched_tax_rates;
+        }
+
+        // Persist the quote for order contexts so later hooks can reuse it.
+        if ($order && $response) {
+            $this->persist_quote_on_order($order, $response);
+        }
 
         $success = !empty($response['success']);
         $ln_count = isset($response['data']['lnRslts']) && is_array($response['data']['lnRslts']) ? count($response['data']['lnRslts']) : 0;
@@ -2742,6 +2839,12 @@ class Woo_Sovos_Public {
         // Skip REST-created orders as in your other logic
         if ($this->is_order_created_via_rest($order)) {
             return;
+        }
+
+        // Persist any cached quote from the checkout session onto the order.
+        $session_quote = $this->get_cached_quote_from_session();
+        if ($session_quote) {
+            $this->persist_quote_on_order($order, $session_quote);
         }
         // Let Woo build order-level tax items from the per-line arrays we just set.
         $order->calculate_taxes();
