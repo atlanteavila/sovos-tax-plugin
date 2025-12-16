@@ -855,6 +855,9 @@ class Woo_Sovos_Public {
      * Shared access point for a Sovos quote, preferring cached data.
      */
     protected function get_or_create_shared_quote( $line_items, $order = null ) {
+        if ( $this->is_exempt_via_session_or_order( $order ) )
+            return false;
+
         $response = $this->get_cached_quote_from_order( $order );
 
         if ( ! $response )
@@ -883,6 +886,9 @@ class Woo_Sovos_Public {
      * @return array|bool Sovos response array on success, false on failure.
      */
     public function quote_tax( $line_items ) {
+
+        if ( $this->is_exempt_via_session_or_order() )
+            return false;
 
         /* ────────────────────────────────
         *  NEW: session‑level cache check
@@ -1200,8 +1206,11 @@ class Woo_Sovos_Public {
      * 
      * @since   1.2.0
      */
-    public function construct_sovos_tax_order_data( $response, $line_items = null ) {
+    public function construct_sovos_tax_order_data( $response, $line_items = null, $order = null ) {
         $sovos_tax = false;
+
+        if ( $this->is_exempt_via_session_or_order( $order ) )
+            return [ 'exempt' => true ];
 
         // Pull from cached quote if none was provided.
         if ( ! $response ) {
@@ -1336,6 +1345,9 @@ class Woo_Sovos_Public {
         if ( $this->is_order_created_via_rest( $order ) )
             return;
 
+        if ( $this->is_exempt_via_session_or_order( $order ) )
+            return;
+
         // TODO: differentiate the _sovos_tax data order and item data
         // EG: _sovos_tax_order from _sovos_tax_item
         $sovos_tax = $order->get_meta( '_sovos_tax' );
@@ -1356,7 +1368,7 @@ class Woo_Sovos_Public {
 
         // Construct the _sovos_tax data
         // $this->construct_sovos_tax_items_data( $response, $order_items );
-        $sovos_tax = $this->construct_sovos_tax_order_data( $response );
+        $sovos_tax = $this->construct_sovos_tax_order_data( $response, null, $order );
 
         if ( ! $sovos_tax )
             return;
@@ -1388,6 +1400,9 @@ class Woo_Sovos_Public {
      */
     public function send_order_data_to_sovos( $order_id, $old_status, $new_status, $order ) {
         if ( 'processing' !== $new_status )
+            return;
+
+        if ( $this->is_exempt_via_session_or_order( $order ) )
             return;
 
         $order_items = $order->get_items();
@@ -1922,6 +1937,266 @@ class Woo_Sovos_Public {
         return $columns;
     }
 
+    /**
+     * Determine if a product (or its parent) is marked as always exempt.
+     */
+    protected function is_product_marked_always_exempt( $product ) : bool {
+        if ( ! $product || ! $product instanceof \WC_Product )
+            return false;
+
+        $flag = wc_string_to_bool( $product->get_meta( '_sovos_always_exempt', true ) );
+
+        if ( ! $flag && $product->get_parent_id() ) {
+            $parent = wc_get_product( $product->get_parent_id() );
+            $flag   = $parent ? wc_string_to_bool( $parent->get_meta( '_sovos_always_exempt', true ) ) : false;
+        }
+
+        return $flag;
+    }
+
+    /**
+     * Extract product exemption flags for each line item.
+     */
+    protected function get_product_exemption_flags( $line_items ) : array {
+        $flags = [];
+
+        foreach ( $line_items as $line_item ) {
+            $product = null;
+
+            if ( is_array( $line_item ) && isset( $line_item['data'] ) ) {
+                $product = $line_item['data'];
+            } elseif ( is_object( $line_item ) && method_exists( $line_item, 'get_product' ) ) {
+                $product = $line_item->get_product();
+            }
+
+            $flags[] = $this->is_product_marked_always_exempt( $product );
+        }
+
+        return $flags;
+    }
+
+    /**
+     * Parse exemption entries from meta values.
+     */
+    protected function parse_exemption_entries( $value ) : array {
+        $entries = is_array( $value ) ? $value : preg_split( '/[\r\n,]+/', (string) $value );
+        $entries = array_map( 'trim', $entries );
+        $entries = array_filter( $entries );
+
+        return array_values( $entries );
+    }
+
+    /**
+     * Gather exemption allowlists from user meta.
+     */
+    protected function gather_user_exemption_allowlists( $user_id ) : array {
+        if ( ! $user_id )
+            return [ 'primary' => [], 'alternate' => [], 'combined' => [] ];
+
+        $primary   = $this->parse_exemption_entries( get_user_meta( $user_id, '_sovos_exempt_emails', true ) );
+        $alternate = $this->parse_exemption_entries( get_user_meta( $user_id, '_sovos_exempt_alternate_emails', true ) );
+
+        return [
+            'primary'   => $primary,
+            'alternate' => $alternate,
+            'combined'  => array_values( array_unique( array_merge( $primary, $alternate ) ) ),
+        ];
+    }
+
+    /**
+     * Determine if an email matches a list of allowlisted emails/domains.
+     */
+    protected function email_matches_allowlist( $email, array $entries ) : bool {
+        if ( ! $email )
+            return false;
+
+        $email  = strtolower( $email );
+        $domain = substr( strrchr( $email, '@' ), 1 );
+
+        foreach ( $entries as $entry ) {
+            $entry = strtolower( trim( $entry ) );
+
+            if ( ! $entry )
+                continue;
+
+            // Exact email match
+            if ( strpos( $entry, '@' ) !== false && strpos( $entry, '@' ) !== 0 ) {
+                if ( $email === $entry )
+                    return true;
+
+                $entry_domain = substr( strrchr( $entry, '@' ), 1 );
+                if ( $entry_domain && $domain === $entry_domain )
+                    return true;
+
+                continue;
+            }
+
+            // Domain match (with or without @ prefix)
+            $entry_domain = ltrim( $entry, '@' );
+            if ( $entry_domain && $domain === $entry_domain )
+                return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Resolve the checkout email from order/session/request context.
+     */
+    protected function get_checkout_email( $order = null ) : string {
+        if ( $order && method_exists( $order, 'get_billing_email' ) ) {
+            $order_email = $order->get_billing_email();
+            if ( $order_email )
+                return sanitize_email( $order_email );
+        }
+
+        if ( isset( $_POST['billing_email'] ) )
+            return sanitize_email( wp_unslash( $_POST['billing_email'] ) );
+
+        if ( function_exists( 'WC' ) && WC()->customer && method_exists( WC()->customer, 'get_billing_email' ) ) {
+            $customer_email = WC()->customer->get_billing_email();
+            if ( $customer_email )
+                return sanitize_email( $customer_email );
+        }
+
+        if ( is_user_logged_in() ) {
+            $user = wp_get_current_user();
+            if ( $user && isset( $user->user_email ) )
+                return sanitize_email( $user->user_email );
+        }
+
+        return '';
+    }
+
+    /**
+     * Build a snapshot of exemption markers for the current context.
+     */
+    protected function collect_exemption_context( $line_items, $order = null ) : array {
+        $email         = $this->get_checkout_email( $order );
+        $product_flags = $this->get_product_exemption_flags( $line_items );
+
+        $user_id = 0;
+        if ( $order && method_exists( $order, 'get_user_id' ) )
+            $user_id = $order->get_user_id();
+        elseif ( is_user_logged_in() )
+            $user_id = get_current_user_id();
+
+        if ( ! $user_id && $email ) {
+            $user = get_user_by( 'email', $email );
+            if ( $user )
+                $user_id = $user->ID;
+        }
+
+        $allowlists = $this->gather_user_exemption_allowlists( $user_id );
+        $vat_exempt = false;
+
+        if ( $order && method_exists( $order, 'is_vat_exempt' ) ) {
+            $vat_exempt = (bool) $order->is_vat_exempt();
+        } elseif ( function_exists( 'WC' ) && WC()->customer && method_exists( WC()->customer, 'get_is_vat_exempt' ) ) {
+            $vat_exempt = (bool) WC()->customer->get_is_vat_exempt();
+        }
+
+        $email_exempt = $this->email_matches_allowlist( $email, $allowlists['combined'] );
+
+        return [
+            'email'               => $email,
+            'user_id'             => $user_id,
+            'allowlists'          => $allowlists,
+            'allowlist_hash'      => md5( wp_json_encode( [ $allowlists['primary'], $allowlists['alternate'] ] ) ),
+            'email_exempt'        => $email_exempt,
+            'vat_exempt'          => $vat_exempt,
+            'product_flags'       => $product_flags,
+            'all_products_exempt' => ! empty( $product_flags ) && count( array_filter( $product_flags ) ) === count( $product_flags ),
+        ];
+    }
+
+    /**
+     * Detect whether the current request should skip Sovos because it is already exempt.
+     */
+    protected function detect_known_exemption( $line_items, $order = null ) : array {
+        $context        = $this->collect_exemption_context( $line_items, $order );
+        $session        = $this->get_wc_session();
+        $session_exempt = $session ? (bool) $session->get( 'sovos_is_exempt' ) : false;
+        $order_exempt   = $order instanceof \WC_Order ? wc_string_to_bool( $order->get_meta( '_sovos_is_exempt', true ) ) : false;
+
+        $is_exempt = (
+            $order_exempt ||
+            $session_exempt ||
+            $context['all_products_exempt'] ||
+            $context['vat_exempt'] ||
+            $context['email_exempt']
+        );
+
+        $reason = '';
+        if ( $order_exempt )
+            $reason = 'order_meta';
+        elseif ( $session_exempt )
+            $reason = 'session_flag';
+        elseif ( $context['all_products_exempt'] )
+            $reason = 'product_meta';
+        elseif ( $context['vat_exempt'] )
+            $reason = 'customer_vat_exempt';
+        elseif ( $context['email_exempt'] )
+            $reason = 'customer_email_allowlist';
+
+        $context['is_exempt']      = $is_exempt;
+        $context['reason']         = $reason;
+        $context['session_exempt'] = $session_exempt;
+        $context['order_exempt']   = $order_exempt;
+
+        return $context;
+    }
+
+    /**
+     * Persist exemption markers to session and order metadata.
+     */
+    protected function sync_exemption_markers( array $context, $order = null ): void {
+        $session = $this->get_wc_session();
+
+        if ( ! empty( $context['is_exempt'] ) ) {
+            if ( $session ) {
+                $session->set( 'sovos_is_exempt', true );
+                $session->set( 'sovos_exempt_reason', $context['reason'] );
+                $session->set( 'sovos_exempt_email', $context['email'] );
+            }
+
+            if ( $order && $order instanceof \WC_Order ) {
+                $order->update_meta_data( '_sovos_is_exempt', true );
+
+                if ( ! empty( $context['reason'] ) )
+                    $order->update_meta_data( '_sovos_exempt_reason', $context['reason'] );
+
+                if ( ! empty( $context['email'] ) )
+                    $order->update_meta_data( '_sovos_exempt_email', $context['email'] );
+
+                $order->save_meta_data();
+            }
+
+            return;
+        }
+
+        if ( $session ) {
+            $session->set( 'sovos_is_exempt', false );
+            $session->set( 'sovos_exempt_reason', null );
+            $session->set( 'sovos_exempt_email', null );
+        }
+    }
+
+    /**
+     * Check whether the current session/order is flagged as exempt.
+     */
+    protected function is_exempt_via_session_or_order( $order = null ): bool {
+        $session = $this->get_wc_session();
+
+        if ( $session && $session->get( 'sovos_is_exempt' ) )
+            return true;
+
+        if ( $order && $order instanceof \WC_Order )
+            return wc_string_to_bool( $order->get_meta( '_sovos_is_exempt', true ) );
+
+        return false;
+    }
+
 
     /**
      * Are Any Line Results Exempt
@@ -2210,6 +2485,8 @@ class Woo_Sovos_Public {
      */
     public function replace_matched_tax_rates($matched_tax_rates, $country, $state, $postcode, $city)
     {
+        $original_tax_rates = $matched_tax_rates;
+
         // ── logger helper ───────────────────────────────────────────────
         $log = function ($msg) {
             if (function_exists('wc_get_logger')) {
@@ -2235,9 +2512,6 @@ class Woo_Sovos_Public {
             $log('EARLY RETURN: not checkout/ajax/admin');
             return $matched_tax_rates; // leave cart page alone
         }
-
-        // Sovos is source of truth → start fresh (remove any WC table matches)
-        $matched_tax_rates = [];
 
         // Context: order in admin, otherwise cart
         global $post;
@@ -2273,12 +2547,23 @@ class Woo_Sovos_Public {
             return $matched_tax_rates;
         }
 
+        $exemption_context = $this->detect_known_exemption( $line_items, $order );
+        $this->sync_exemption_markers( $exemption_context, $order );
+
+        if ( ! empty( $exemption_context['is_exempt'] ) ) {
+            $log( sprintf( 'EARLY RETURN: exemption detected (%s)', $exemption_context['reason'] ?: 'unspecified' ) );
+            return $original_tax_rates;
+        }
+
+        // Sovos is source of truth → start fresh (remove any WC table matches)
+        $matched_tax_rates = [];
+
         // Quote Sovos using shared cache (session/order)
         $response = $this->get_or_create_shared_quote($line_items, $order);
 
         if ( ! $response ) {
             $log('EARLY RETURN: missing sovos response');
-            return $matched_tax_rates;
+            return $original_tax_rates;
         }
 
         // Persist the quote for order contexts so later hooks can reuse it.
@@ -2293,15 +2578,17 @@ class Woo_Sovos_Public {
 
         if (!$success) {
             $log('EARLY RETURN: sovos response success=false');
-            return $matched_tax_rates;
+            return $original_tax_rates;
         }
         if ($ln_count === 0) {
             $log('EARLY RETURN: sovos lnRslts empty');
-            return $matched_tax_rates;
+            return $original_tax_rates;
         }
-        if ($this->are_any_line_results_exempt($response)) {
+
+        $total_tax_amount = is_numeric( $txAmt ) ? (float) $txAmt : null;
+        if ($this->are_any_line_results_exempt($response) && ( $total_tax_amount === null || $total_tax_amount <= 0 )) {
             $log('EARLY RETURN: exempt lines (zero tax)');
-            return $matched_tax_rates;
+            return $original_tax_rates;
         }
 
         // Store per-line Sovos meta and build rates
@@ -2920,6 +3207,8 @@ class Woo_Sovos_Public {
             $line_items
         );
 
+        $exemption_context = $this->collect_exemption_context( $line_items );
+
         $payload = [
             'addr'          => $address,
             'cart'          => $line_items_payload,
@@ -2929,6 +3218,15 @@ class Woo_Sovos_Public {
             'customer'      => [
                 'roles'       => $customer_roles,
                 'tax_markers' => $tax_class_markers,
+            ],
+            'exemption'     => [
+                'product_flags'       => $exemption_context['product_flags'],
+                'all_products_exempt' => $exemption_context['all_products_exempt'],
+                'vat_exempt'          => $exemption_context['vat_exempt'],
+                'email_exempt'        => $exemption_context['email_exempt'],
+                'email'               => $exemption_context['email'],
+                'allowlist_hash'      => $exemption_context['allowlist_hash'],
+                'session_exempt'      => $session ? $session->get( 'sovos_is_exempt' ) : null,
             ],
             'line_classes'  => $line_tax_classes,
         ];
@@ -2984,6 +3282,27 @@ class Woo_Sovos_Public {
      */
     public function finalize_order_taxes_on_create($order, $data)
     {
+        if ( $this->is_exempt_via_session_or_order( $order ) ) {
+            $session = $this->get_wc_session();
+
+            $order->update_meta_data( '_sovos_is_exempt', true );
+
+            if ( $session ) {
+                $reason = $session->get( 'sovos_exempt_reason' );
+                $email  = $session->get( 'sovos_exempt_email' );
+
+                if ( $reason )
+                    $order->update_meta_data( '_sovos_exempt_reason', $reason );
+
+                if ( $email )
+                    $order->update_meta_data( '_sovos_exempt_email', $email );
+            }
+
+            $order->save_meta_data();
+
+            return;
+        }
+
         // Skip REST-created orders as in your other logic
         if ($this->is_order_created_via_rest($order)) {
             return;
