@@ -2563,7 +2563,7 @@ class Woo_Sovos_Public {
 
         if ( ! $response ) {
             $log('EARLY RETURN: missing sovos response');
-            return $matched_tax_rates;
+            return $original_tax_rates;
         }
 
         // Persist the quote for order contexts so later hooks can reuse it.
@@ -2578,17 +2578,17 @@ class Woo_Sovos_Public {
 
         if (!$success) {
             $log('EARLY RETURN: sovos response success=false');
-            return $matched_tax_rates;
+            return $original_tax_rates;
         }
         if ($ln_count === 0) {
             $log('EARLY RETURN: sovos lnRslts empty');
-            return $matched_tax_rates;
+            return $original_tax_rates;
         }
 
         $total_tax_amount = is_numeric( $txAmt ) ? (float) $txAmt : null;
         if ($this->are_any_line_results_exempt($response) && ( $total_tax_amount === null || $total_tax_amount <= 0 )) {
             $log('EARLY RETURN: exempt lines (zero tax)');
-            return $matched_tax_rates;
+            return $original_tax_rates;
         }
 
         // Store per-line Sovos meta and build rates
