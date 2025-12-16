@@ -117,9 +117,21 @@ class Woo_Sovos_Public {
      */
     public function enqueue_scripts() {
 
+        if ( ! is_checkout() ) {
+            return;
+        }
+
         // Scripts.
         $file = 'public/assets/js/scripts.js';
         wp_enqueue_script( $this->plugin_name, WOO_SOVOS_URI . $file, ['jquery'], $this->cache_bust_version( WOO_SOVOS_PATH . $file ), false );
+
+        wp_localize_script(
+            $this->plugin_name,
+            'sovosCheckoutIntent',
+            [
+                'nonce' => wp_create_nonce( 'sovos_checkout_intent' ),
+            ]
+        );
 
     }
 
@@ -2467,6 +2479,22 @@ class Woo_Sovos_Public {
     }
 
     /**
+     * Check whether the checkout request explicitly asked Sovos to quote taxes.
+     *
+     * @return bool
+     */
+    protected function has_checkout_intent_nonce(): bool
+    {
+        if (!isset($_POST['_sovos_checkout_nonce'])) {
+            return false;
+        }
+
+        $nonce = sanitize_text_field(wp_unslash($_POST['_sovos_checkout_nonce']));
+
+        return !empty($nonce) && wp_verify_nonce($nonce, 'sovos_checkout_intent') !== false;
+    }
+
+    /**
      * Replace the matched tax rates with a custom rate.
      *
      * @param array  $matched_tax_rates The matched tax rates.
@@ -2480,7 +2508,7 @@ class Woo_Sovos_Public {
      * @since 1.2.0
      * 
      * @hooked woocommerce_matched_tax_rates
-     * 
+     *
      * TODO: check woocommerce_checkout_create_order_tax_item and WC_Order_Item_Tax functionality. This might be a better way to add the tax to the items.
      */
     public function replace_matched_tax_rates($matched_tax_rates, $country, $state, $postcode, $city)
@@ -2507,6 +2535,11 @@ class Woo_Sovos_Public {
         $is_ajax = defined('DOING_AJAX') && DOING_AJAX && isset($_POST['action']) && $_POST['action'] === 'woocommerce_update_order_review';
         $is_admin = is_admin();
         $log(sprintf('FLAGS: checkout=%d ajax=%d admin=%d', $is_checkout ? 1 : 0, $is_ajax ? 1 : 0, $is_admin ? 1 : 0));
+
+        if ($is_ajax && !$this->has_checkout_intent_nonce()) {
+            $log('EARLY RETURN: missing checkout intent nonce');
+            return $matched_tax_rates;
+        }
 
         if (!$is_checkout && !$is_ajax && !$is_admin) {
             $log('EARLY RETURN: not checkout/ajax/admin');

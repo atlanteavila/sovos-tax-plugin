@@ -139,6 +139,7 @@ class Woo_Sovos_Plugin {
 
         // Enqueue styles.
         $this->loader->add_action('wp_enqueue_scripts', $public, 'enqueue_styles');
+        $this->loader->add_action('wp_enqueue_scripts', $public, 'enqueue_scripts');
 
         // Add Sovos Transaction ID Tax to New Order (note-only; does not persist tax).
         $this->loader->add_action('woocommerce_new_order', $public, 'add_sovos_transaction_id_to_new_order', 10, 2);
