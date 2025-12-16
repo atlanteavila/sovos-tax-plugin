@@ -2584,7 +2584,9 @@ class Woo_Sovos_Public {
             $log('EARLY RETURN: sovos lnRslts empty');
             return $matched_tax_rates;
         }
-        if ($this->are_any_line_results_exempt($response)) {
+
+        $total_tax_amount = is_numeric( $txAmt ) ? (float) $txAmt : null;
+        if ($this->are_any_line_results_exempt($response) && ( $total_tax_amount === null || $total_tax_amount <= 0 )) {
             $log('EARLY RETURN: exempt lines (zero tax)');
             return $matched_tax_rates;
         }
