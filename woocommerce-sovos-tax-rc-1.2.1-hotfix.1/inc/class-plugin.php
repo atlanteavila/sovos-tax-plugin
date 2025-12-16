@@ -105,6 +105,12 @@ class Woo_Sovos_Plugin {
 
         // Add actions.
         $this->loader->add_action( 'admin_enqueue_scripts', $private, 'enqueue_styles' );
+        $this->loader->add_action( 'woocommerce_product_options_general_product_data', $private, 'render_product_exemption_field' );
+        $this->loader->add_action( 'woocommerce_admin_process_product_object', $private, 'save_product_exemption_field', 10, 1 );
+        $this->loader->add_action( 'show_user_profile', $private, 'render_user_exemption_fields' );
+        $this->loader->add_action( 'edit_user_profile', $private, 'render_user_exemption_fields' );
+        $this->loader->add_action( 'personal_options_update', $private, 'save_user_exemption_fields', 10, 1 );
+        $this->loader->add_action( 'edit_user_profile_update', $private, 'save_user_exemption_fields', 10, 1 );
         // $this->loader->add_action( 'admin_enqueue_scripts', $private, 'enqueue_scripts' );
 
         // Add filters.
