@@ -838,6 +838,33 @@ class Woo_Sovos_Public {
     }
 
     /**
+     * Persist the last matched rates we returned to the shopper so we can
+     * continue displaying them when nonce-less AJAX requests are skipped.
+     */
+    protected function set_last_matched_rates_in_session( $matched_tax_rates ): void {
+        $session = $this->get_wc_session();
+
+        if ( ! $session ) {
+            return;
+        }
+
+        $session->set( 'sovos_last_matched_rates', $matched_tax_rates );
+    }
+
+    /**
+     * Retrieve the last matched rates we displayed to the shopper.
+     */
+    protected function get_last_matched_rates_from_session() {
+        $session = $this->get_wc_session();
+
+        if ( ! $session ) {
+            return false;
+        }
+
+        return $session->get( 'sovos_last_matched_rates', false );
+    }
+
+    /**
      * Retrieve a persisted quote from the order meta.
      */
     protected function get_cached_quote_from_order( $order ) {
@@ -2619,6 +2646,13 @@ class Woo_Sovos_Public {
         }
 
         if (!$response && !$allow_fresh_quote) {
+            $fallback_rates = $this->get_last_matched_rates_from_session();
+
+            if ( $fallback_rates ) {
+                $log('EARLY RETURN: missing checkout intent nonce and no cached response (reusing last matched rates)');
+                return $fallback_rates;
+            }
+
             $log('EARLY RETURN: missing checkout intent nonce and no cached response');
             return $original_tax_rates;
         }
@@ -2706,6 +2740,9 @@ class Woo_Sovos_Public {
         }
 
         $log('RETURNING rates: ' . print_r($matched_tax_rates, true));
+
+        // Cache the matched rates so nonce-less AJAX can continue showing taxes.
+        $this->set_last_matched_rates_in_session( $matched_tax_rates );
 
         return $matched_tax_rates;
     }
