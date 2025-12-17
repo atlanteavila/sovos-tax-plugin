@@ -2658,6 +2658,13 @@ class Woo_Sovos_Public {
         }
 
         if ( ! $response ) {
+            $fallback_rates = $this->get_last_matched_rates_from_session();
+
+            if ( $fallback_rates ) {
+                $log('EARLY RETURN: missing sovos response (reusing last matched rates)');
+                return $fallback_rates;
+            }
+
             $log('EARLY RETURN: missing sovos response');
             return $original_tax_rates;
         }
