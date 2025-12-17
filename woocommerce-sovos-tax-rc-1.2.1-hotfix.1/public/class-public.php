@@ -2532,7 +2532,12 @@ class Woo_Sovos_Public {
 
         // Only take over during checkout/order-review ajax/admin edits
         $is_checkout = is_checkout();
-        $is_ajax = defined('DOING_AJAX') && DOING_AJAX && isset($_POST['action']) && $_POST['action'] === 'woocommerce_update_order_review';
+        $is_wp_ajax = function_exists('wp_doing_ajax') ? wp_doing_ajax() : (defined('DOING_AJAX') && DOING_AJAX);
+        $is_update_order_review = (
+            (isset($_POST['action']) && $_POST['action'] === 'woocommerce_update_order_review') ||
+            (isset($_REQUEST['wc-ajax']) && $_REQUEST['wc-ajax'] === 'update_order_review')
+        );
+        $is_ajax = $is_wp_ajax && $is_update_order_review;
         $is_admin = is_admin();
         $log(sprintf('FLAGS: checkout=%d ajax=%d admin=%d', $is_checkout ? 1 : 0, $is_ajax ? 1 : 0, $is_admin ? 1 : 0));
 
