@@ -2541,9 +2541,12 @@ class Woo_Sovos_Public {
         $is_admin = is_admin();
         $log(sprintf('FLAGS: checkout=%d ajax=%d admin=%d', $is_checkout ? 1 : 0, $is_ajax ? 1 : 0, $is_admin ? 1 : 0));
 
-        if ($is_ajax && !$this->has_checkout_intent_nonce()) {
-            $log('EARLY RETURN: missing checkout intent nonce');
-            return $matched_tax_rates;
+        $has_checkout_intent = $this->has_checkout_intent_nonce();
+        $allow_fresh_quote = true;
+
+        if ($is_ajax && !$has_checkout_intent) {
+            $allow_fresh_quote = false;
+            $log('CHECKOUT INTENT: ajax without nonce → skip new Sovos quote, prefer cache');
         }
 
         if (!$is_checkout && !$is_ajax && !$is_admin) {
@@ -2597,7 +2600,24 @@ class Woo_Sovos_Public {
         $matched_tax_rates = [];
 
         // Quote Sovos using shared cache (session/order)
-        $response = $this->get_or_create_shared_quote($line_items, $order);
+        if ($allow_fresh_quote) {
+            $response = $this->get_or_create_shared_quote($line_items, $order);
+        } else {
+            $response = $this->get_cached_quote_from_order($order);
+
+            if (!$response) {
+                $response = $this->get_cached_quote_from_session($line_items);
+            }
+
+            if ($response) {
+                $log('REUSING cached Sovos response (nonce not provided)');
+            }
+        }
+
+        if (!$response && !$allow_fresh_quote) {
+            $log('EARLY RETURN: missing checkout intent nonce and no cached response');
+            return $matched_tax_rates;
+        }
 
         if ( ! $response ) {
             $log('EARLY RETURN: missing sovos response');
