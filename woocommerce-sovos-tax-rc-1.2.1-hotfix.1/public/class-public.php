@@ -2596,9 +2596,6 @@ class Woo_Sovos_Public {
             return $original_tax_rates;
         }
 
-        // Sovos is source of truth → start fresh (remove any WC table matches)
-        $matched_tax_rates = [];
-
         // Quote Sovos using shared cache (session/order)
         if ($allow_fresh_quote) {
             $response = $this->get_or_create_shared_quote($line_items, $order);
@@ -2616,7 +2613,7 @@ class Woo_Sovos_Public {
 
         if (!$response && !$allow_fresh_quote) {
             $log('EARLY RETURN: missing checkout intent nonce and no cached response');
-            return $matched_tax_rates;
+            return $original_tax_rates;
         }
 
         if ( ! $response ) {
@@ -2655,6 +2652,8 @@ class Woo_Sovos_Public {
         $log("SOVOS TAX ITEMS: count={$sti_count}");
 
         // Dedupe across items that share the same jurisdiction + percent
+        // Sovos is source of truth → start fresh (remove any WC table matches)
+        $matched_tax_rates = [];
         $seen = [];
 
         foreach ($sovos_tax_items as $line_item) {
