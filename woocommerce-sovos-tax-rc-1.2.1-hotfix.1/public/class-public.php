@@ -2606,6 +2606,13 @@ class Woo_Sovos_Public {
                 $response = $this->get_cached_quote_from_session($line_items);
             }
 
+            // If the line-item keyed cache misses, try the legacy session cache so
+            // we keep the last good Sovos response on screen until the shopper
+            // explicitly requests a fresh quote.
+            if (!$response) {
+                $response = $this->get_cached_quote_from_session();
+            }
+
             if ($response) {
                 $log('REUSING cached Sovos response (nonce not provided)');
             }
