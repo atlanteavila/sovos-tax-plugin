@@ -29,9 +29,13 @@
         ensureIntentField().val( nonce );
     };
 
-    $( document.body ).on( 'click', 'form.checkout button[name="update_order_review"], form.checkout button[name="woocommerce_checkout_update_totals"]', function () {
-        markIntent();
-    } );
+    $( document.body ).on(
+        'click',
+        'form.checkout button[name="update_order_review"], form.checkout input[name="update_order_review"], form.checkout button[name="woocommerce_checkout_update_totals"], form.checkout input[name="woocommerce_checkout_update_totals"], form.checkout :submit',
+        function () {
+            markIntent();
+        }
+    );
 
     $( 'form.checkout' ).on( 'checkout_place_order', function () {
         markIntent();
