@@ -152,24 +152,49 @@ class Woo_Sovos_Public {
     let allowImmediate = false;
     let queuedUpdate = null;
 
-    const fieldFilled = (selector) => {
+    const fieldFilled = (selector, options = {}) => {
+        const { minLength = 1 } = options;
         const field = $(selector);
 
         if (!field.length) {
             return true;
         }
 
-        const value = field.val();
-        return typeof value === 'string' && value.trim() !== '';
+        const value = typeof field.val() === 'string' ? field.val().trim() : '';
+        return value.length >= minLength;
     };
 
-    const isBillingComplete = () => [
-        '#billing_country',
-        '#billing_address_1',
-        '#billing_city',
-        '#billing_state',
-        '#billing_postcode'
-    ].every(fieldFilled);
+    const getPostcodeMinLength = (country) => {
+        switch ((country || '').toUpperCase()) {
+            case 'US':
+                return 5;
+            case 'CA':
+                return 3;
+            case 'AU':
+                return 4;
+            case 'GB':
+                return 3;
+            default:
+                return 3;
+        }
+    };
+
+    const getFieldValue = (selector) => {
+        const field = $(selector);
+        return field.length ? String(field.val() || '').trim() : '';
+    };
+
+    const isBillingComplete = () => {
+        const billingCountry = getFieldValue('#billing_country');
+        const postcodeMinLength = getPostcodeMinLength(billingCountry);
+
+        return [
+            '#billing_country',
+            '#billing_address_1',
+            '#billing_city',
+            '#billing_state'
+        ].every(fieldFilled) && fieldFilled('#billing_postcode', { minLength: postcodeMinLength });
+    };
 
     const isShippingDifferent = () => $('#ship-to-different-address-checkbox').is(':checked');
 
@@ -178,13 +203,15 @@ class Woo_Sovos_Public {
             return isBillingComplete();
         }
 
+        const shippingCountry = getFieldValue('#shipping_country');
+        const postcodeMinLength = getPostcodeMinLength(shippingCountry);
+
         return [
             '#shipping_country',
             '#shipping_address_1',
             '#shipping_city',
-            '#shipping_state',
-            '#shipping_postcode'
-        ].every(fieldFilled);
+            '#shipping_state'
+        ].every(fieldFilled) && fieldFilled('#shipping_postcode', { minLength: postcodeMinLength });
     };
 
     const canUpdateCheckout = () => isBillingComplete() && isShippingComplete();
