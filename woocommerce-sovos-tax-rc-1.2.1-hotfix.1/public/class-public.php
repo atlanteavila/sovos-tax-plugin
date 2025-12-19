@@ -153,6 +153,7 @@ class Woo_Sovos_Public {
     let queuedUpdate = null;
     let lastAddressKey = null;
     let lastCompleteness = false;
+    let addressPollTimer = null;
 
     const fieldFilled = (selector, options = {}) => {
         const { minLength = 1 } = options;
@@ -293,11 +294,30 @@ class Woo_Sovos_Public {
         lastCompleteness = complete;
     };
 
+    const startAddressPolling = (durationMs = 4000, intervalMs = 250) => {
+        if (addressPollTimer) {
+            clearInterval(addressPollTimer);
+            addressPollTimer = null;
+        }
+
+        const start = Date.now();
+        addressPollTimer = setInterval(() => {
+            handleAddressChange();
+
+            if (Date.now() - start >= durationMs) {
+                clearInterval(addressPollTimer);
+                addressPollTimer = null;
+            }
+        }, intervalMs);
+    };
+
     const scheduleInitialRechecks = () => {
         const delays = [0, 150, 500];
         delays.forEach((delay) => {
             setTimeout(handleAddressChange, delay);
         });
+
+        startAddressPolling();
     };
 
     const watchAddressChanges = () => {
@@ -320,6 +340,11 @@ class Woo_Sovos_Public {
         });
 
         $(document.body).on('updated_checkout wc_address_i18n_ready', handleAddressChange);
+
+        $(document.body).on('change', '#ship-to-different-address-checkbox', () => {
+            handleAddressChange();
+            startAddressPolling();
+        });
     };
 
     const registerManualTriggers = () => {
