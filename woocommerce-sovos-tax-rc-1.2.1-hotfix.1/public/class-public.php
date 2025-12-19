@@ -286,7 +286,8 @@ class Woo_Sovos_Public {
 
         flushPendingUpdate();
 
-        if (!queuedUpdate && (becameComplete || changedWhileComplete)) {
+        if (complete && (becameComplete || changedWhileComplete)) {
+            // Ensure a fresh recalculation even if no update was queued (or after a queued one was flushed).
             forceUpdate();
         }
 
@@ -294,7 +295,7 @@ class Woo_Sovos_Public {
         lastCompleteness = complete;
     };
 
-    const startAddressPolling = (durationMs = 4000, intervalMs = 250) => {
+    const startAddressPolling = (durationMs = 8000, intervalMs = 250) => {
         if (addressPollTimer) {
             clearInterval(addressPollTimer);
             addressPollTimer = null;
