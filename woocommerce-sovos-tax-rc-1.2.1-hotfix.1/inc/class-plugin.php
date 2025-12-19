@@ -140,6 +140,9 @@ class Woo_Sovos_Plugin {
         // Enqueue styles.
         $this->loader->add_action('wp_enqueue_scripts', $public, 'enqueue_styles');
 
+        // Gate checkout recalcs until address data is ready.
+        $this->loader->add_action('wp_enqueue_scripts', $public, 'enqueue_checkout_gating_script', 20);
+
         // Add Sovos Transaction ID Tax to New Order (note-only; does not persist tax).
         $this->loader->add_action('woocommerce_new_order', $public, 'add_sovos_transaction_id_to_new_order', 10, 2);
 
