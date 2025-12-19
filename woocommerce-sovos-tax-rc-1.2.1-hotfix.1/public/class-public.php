@@ -124,6 +124,244 @@ class Woo_Sovos_Public {
     }
 
     /**
+     * Gate checkout updates until the checkout form has enough data.
+     */
+    public function enqueue_checkout_gating_script() {
+        if ( ! function_exists( 'is_checkout' ) || ! is_checkout() ) {
+            return;
+        }
+
+        $checkout_handle = 'wc-checkout';
+
+        if ( ! wp_script_is( $checkout_handle, 'enqueued' ) ) {
+            return;
+        }
+
+        $inline_script = <<<'JS'
+(function ($) {
+    if (!$.fn.trigger || !document.body) {
+        return;
+    }
+
+    const originalTrigger = $.fn.trigger;
+
+    if (originalTrigger.__sovosDeferredApplied) {
+        return;
+    }
+
+    let allowImmediate = false;
+    let queuedUpdate = null;
+    let lastAddressKey = null;
+    let lastCompleteness = false;
+
+    const fieldFilled = (selector, options = {}) => {
+        const { minLength = 1 } = options;
+        const field = $(selector);
+
+        if (!field.length) {
+            return true;
+        }
+
+        const value = typeof field.val() === 'string' ? field.val().trim() : '';
+        return value.length >= minLength;
+    };
+
+    const getPostcodeMinLength = (country) => {
+        switch ((country || '').toUpperCase()) {
+            case 'US':
+                return 5;
+            case 'CA':
+                return 3;
+            case 'AU':
+                return 4;
+            case 'GB':
+                return 3;
+            default:
+                return 3;
+        }
+    };
+
+    const getFieldValue = (selector) => {
+        const field = $(selector);
+        return field.length ? String(field.val() || '').trim() : '';
+    };
+
+    const isBillingComplete = () => {
+        const billingCountry = getFieldValue('#billing_country');
+        const postcodeMinLength = getPostcodeMinLength(billingCountry);
+
+        return [
+            '#billing_country',
+            '#billing_address_1',
+            '#billing_city',
+            '#billing_state'
+        ].every(fieldFilled) && fieldFilled('#billing_postcode', { minLength: postcodeMinLength });
+    };
+
+    const isShippingDifferent = () => $('#ship-to-different-address-checkbox').is(':checked');
+
+    const isShippingComplete = () => {
+        if (!isShippingDifferent()) {
+            return isBillingComplete();
+        }
+
+        const shippingCountry = getFieldValue('#shipping_country');
+        const postcodeMinLength = getPostcodeMinLength(shippingCountry);
+
+        return [
+            '#shipping_country',
+            '#shipping_address_1',
+            '#shipping_city',
+            '#shipping_state'
+        ].every(fieldFilled) && fieldFilled('#shipping_postcode', { minLength: postcodeMinLength });
+    };
+
+    const canUpdateCheckout = () => isBillingComplete() && isShippingComplete();
+
+    const buildAddressKey = () => {
+        const base = {
+            billing: {
+                country: getFieldValue('#billing_country'),
+                address1: getFieldValue('#billing_address_1'),
+                city: getFieldValue('#billing_city'),
+                state: getFieldValue('#billing_state'),
+                postcode: getFieldValue('#billing_postcode'),
+            },
+            shipToDifferent: isShippingDifferent(),
+        };
+
+        if (isShippingDifferent()) {
+            base.shipping = {
+                country: getFieldValue('#shipping_country'),
+                address1: getFieldValue('#shipping_address_1'),
+                city: getFieldValue('#shipping_city'),
+                state: getFieldValue('#shipping_state'),
+                postcode: getFieldValue('#shipping_postcode'),
+            };
+        }
+
+        return JSON.stringify(base);
+    };
+
+    const forceUpdate = () => {
+        allowImmediate = true;
+        try {
+            originalTrigger.call($(document.body), 'update_checkout');
+        } finally {
+            allowImmediate = false;
+        }
+    };
+
+    const flushPendingUpdate = () => {
+        if (!queuedUpdate || !canUpdateCheckout()) {
+            return;
+        }
+
+        const { context, args } = queuedUpdate;
+        queuedUpdate = null;
+
+        allowImmediate = true;
+        try {
+            originalTrigger.apply(context, args);
+        } finally {
+            allowImmediate = false;
+        }
+    };
+
+    const maybeQueueUpdate = (context, args) => {
+        if (allowImmediate || canUpdateCheckout()) {
+            return false;
+        }
+
+        queuedUpdate = { context, args };
+        return true;
+    };
+
+    const handleAddressChange = () => {
+        const addressKey = buildAddressKey();
+        const complete = canUpdateCheckout();
+        const becameComplete = complete && !lastCompleteness;
+        const changedWhileComplete = complete && lastCompleteness && addressKey !== lastAddressKey;
+
+        flushPendingUpdate();
+
+        if (!queuedUpdate && (becameComplete || changedWhileComplete)) {
+            forceUpdate();
+        }
+
+        lastAddressKey = addressKey;
+        lastCompleteness = complete;
+    };
+
+    const watchAddressChanges = () => {
+        const selectors = [
+            '#billing_country',
+            '#billing_address_1',
+            '#billing_city',
+            '#billing_state',
+            '#billing_postcode',
+            '#shipping_country',
+            '#shipping_address_1',
+            '#shipping_city',
+            '#shipping_state',
+            '#shipping_postcode',
+            '#ship-to-different-address-checkbox'
+        ];
+
+        selectors.forEach((selector) => {
+            $(document.body).on('change keyup', selector, handleAddressChange);
+        });
+    };
+
+    const registerManualTriggers = () => {
+        const registry = window.sovosDeferUpdateTriggers || {};
+
+        registry.isBillingComplete = isBillingComplete;
+        registry.isShippingComplete = isShippingComplete;
+        registry.hasPendingUpdate = () => !!queuedUpdate;
+        registry.flushPendingUpdate = flushPendingUpdate;
+        registry.forceUpdate = forceUpdate;
+
+        window.sovosDeferUpdateTriggers = registry;
+    };
+
+    $.fn.trigger = function () {
+        const args = Array.prototype.slice.call(arguments);
+        const eventType = args[0];
+        const normalizedType = (eventType && eventType.type) ? eventType.type : eventType;
+
+        if (normalizedType === 'update_checkout' && this.is(document.body)) {
+            if (maybeQueueUpdate(this, args)) {
+                return this;
+            }
+        }
+
+        const result = originalTrigger.apply(this, args);
+
+        if (normalizedType === 'update_checkout' && this.is(document.body)) {
+            queuedUpdate = null;
+        }
+
+        return result;
+    };
+
+    originalTrigger.__sovosDeferredApplied = true;
+
+    $(function () {
+        registerManualTriggers();
+        watchAddressChanges();
+
+        // Capture initial state and trigger an update if the form loads in a complete state without a queued update.
+        handleAddressChange();
+    });
+})(jQuery);
+JS;
+
+        wp_add_inline_script( $checkout_handle, $inline_script, 'after' );
+
+    }
+
+    /**
      * Check if API Credentials Are Set
      * 
      * @return bool - True if the API credentials are set, false otherwise.
