@@ -151,6 +151,8 @@ class Woo_Sovos_Public {
 
     let allowImmediate = false;
     let queuedUpdate = null;
+    let lastAddressKey = null;
+    let lastCompleteness = false;
 
     const fieldFilled = (selector, options = {}) => {
         const { minLength = 1 } = options;
@@ -216,6 +218,40 @@ class Woo_Sovos_Public {
 
     const canUpdateCheckout = () => isBillingComplete() && isShippingComplete();
 
+    const buildAddressKey = () => {
+        const base = {
+            billing: {
+                country: getFieldValue('#billing_country'),
+                address1: getFieldValue('#billing_address_1'),
+                city: getFieldValue('#billing_city'),
+                state: getFieldValue('#billing_state'),
+                postcode: getFieldValue('#billing_postcode'),
+            },
+            shipToDifferent: isShippingDifferent(),
+        };
+
+        if (isShippingDifferent()) {
+            base.shipping = {
+                country: getFieldValue('#shipping_country'),
+                address1: getFieldValue('#shipping_address_1'),
+                city: getFieldValue('#shipping_city'),
+                state: getFieldValue('#shipping_state'),
+                postcode: getFieldValue('#shipping_postcode'),
+            };
+        }
+
+        return JSON.stringify(base);
+    };
+
+    const forceUpdate = () => {
+        allowImmediate = true;
+        try {
+            originalTrigger.call($(document.body), 'update_checkout');
+        } finally {
+            allowImmediate = false;
+        }
+    };
+
     const flushPendingUpdate = () => {
         if (!queuedUpdate || !canUpdateCheckout()) {
             return;
@@ -241,6 +277,22 @@ class Woo_Sovos_Public {
         return true;
     };
 
+    const handleAddressChange = () => {
+        const addressKey = buildAddressKey();
+        const complete = canUpdateCheckout();
+        const becameComplete = complete && !lastCompleteness;
+        const changedWhileComplete = complete && lastCompleteness && addressKey !== lastAddressKey;
+
+        flushPendingUpdate();
+
+        if (!queuedUpdate && (becameComplete || changedWhileComplete)) {
+            forceUpdate();
+        }
+
+        lastAddressKey = addressKey;
+        lastCompleteness = complete;
+    };
+
     const watchAddressChanges = () => {
         const selectors = [
             '#billing_country',
@@ -257,7 +309,7 @@ class Woo_Sovos_Public {
         ];
 
         selectors.forEach((selector) => {
-            $(document.body).on('change keyup', selector, flushPendingUpdate);
+            $(document.body).on('change keyup', selector, handleAddressChange);
         });
     };
 
@@ -268,14 +320,7 @@ class Woo_Sovos_Public {
         registry.isShippingComplete = isShippingComplete;
         registry.hasPendingUpdate = () => !!queuedUpdate;
         registry.flushPendingUpdate = flushPendingUpdate;
-        registry.forceUpdate = () => {
-            allowImmediate = true;
-            try {
-                originalTrigger.call($(document.body), 'update_checkout');
-            } finally {
-                allowImmediate = false;
-            }
-        };
+        registry.forceUpdate = forceUpdate;
 
         window.sovosDeferUpdateTriggers = registry;
     };
@@ -305,7 +350,9 @@ class Woo_Sovos_Public {
     $(function () {
         registerManualTriggers();
         watchAddressChanges();
-        flushPendingUpdate();
+
+        // Capture initial state and trigger an update if the form loads in a complete state without a queued update.
+        handleAddressChange();
     });
 })(jQuery);
 JS;
