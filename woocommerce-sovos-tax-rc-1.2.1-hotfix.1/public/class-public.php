@@ -65,6 +65,11 @@ class Woo_Sovos_Public {
     protected $api_tax_class_slug = 'api-orders';
 
     /**
+     * In-request Sovos quote cache to prevent duplicate calls within the same PHP request.
+     */
+    protected $runtime_quote_cache = [];
+
+    /**
      * Construct.
      * 
      * @since   1.0.0
@@ -3624,6 +3629,10 @@ JS;
 
     /** Read / write helpers around WC()->session */
     protected function get_cached_quote( string $key ) {
+        if ( isset( $this->runtime_quote_cache[ $key ] ) && $this->is_valid_quote_response( $this->runtime_quote_cache[ $key ] ) ) {
+            return $this->runtime_quote_cache[ $key ];
+        }
+
         $session = $this->get_wc_session();
         $response = $session ? $session->get( "sovos_quote_$key" ) : false;
 
@@ -3643,6 +3652,9 @@ JS;
         if ( ! $this->is_valid_quote_response( $response ) ) {
             return;
         }
+
+        // Always memoize for the current request.
+        $this->runtime_quote_cache[ $key ] = $response;
 
         $session = $this->get_wc_session();
         if ( $session ) {
