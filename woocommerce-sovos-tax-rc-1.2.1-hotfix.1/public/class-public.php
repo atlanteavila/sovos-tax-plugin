@@ -2970,6 +2970,12 @@ JS;
             return $original_tax_rates;
         }
 
+        $to_address = $this->set_to_address();
+        if ( ! $this->validate_address( $to_address ) ) {
+            $log( 'EARLY RETURN: incomplete to_address' );
+            return $original_tax_rates;
+        }
+
         // Sovos is source of truth → start fresh (remove any WC table matches)
         $matched_tax_rates = [];
 
