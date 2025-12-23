@@ -1099,13 +1099,15 @@ JS;
      * @since   1.2.0
      */
     public function get_unique_id_from_response( $response ) {
-        $unique_id = (
-            $response['data']['txwTrnDocId'] ) &&
-            ! empty( isset( $response['data']['txwTrnDocId'] )
-        ) ?
-            $response['data']['txwTrnDocId'] :
-            $response['data']['trnDocNum'];
-        return $unique_id;
+        if ( ! is_array( $response ) || ! isset( $response['data'] ) || ! is_array( $response['data'] ) ) {
+            return null;
+        }
+
+        if ( ! empty( $response['data']['txwTrnDocId'] ) ) {
+            return $response['data']['txwTrnDocId'];
+        }
+
+        return isset( $response['data']['trnDocNum'] ) ? $response['data']['trnDocNum'] : null;
     }
 
     /**
@@ -1262,16 +1264,33 @@ JS;
             return $cached;
         }
 
+        // If another request is already working on this cache key, avoid a duplicate outbound call.
+        $lock = $this->get_quote_lock();
+        if ( $lock && isset( $lock['key'] ) && $lock['key'] === $cache_key ) {
+            $inflight = $this->get_cached_quote( $cache_key );
+            return $inflight ? $inflight : false;
+        }
+
+        // Acquire the lock for this key.
+        $this->set_quote_lock( $cache_key );
+
         /* ────────────────────────────────
         *  ORIGINAL logic starts here
         * ──────────────────────────────── */
         $tax_service = $this->prepare_tax_service( $line_items );
         if ( ! $tax_service ) {
+            $this->clear_quote_lock();
             return false;                           // prerequisites not met
         }
 
-        $response = $tax_service->quoteTax();       // live Sovos call
-        $tax_service->clearTaxService();            // tidy up
+        try {
+            $response = $tax_service->quoteTax();       // live Sovos call
+        } catch ( \Throwable $e ) {
+            $this->clear_quote_lock();
+            throw $e;
+        } finally {
+            $tax_service->clearTaxService();            // tidy up
+        }
 
         // Existing diagnostics / storage
         $this->log_response( [ 'response' => $response ] );
@@ -1281,6 +1300,7 @@ JS;
         *  NEW: cache the fresh response
         * ──────────────────────────────── */
         $this->set_cached_quote( $cache_key, $response );
+        $this->clear_quote_lock();
 
         return $response;
     }
@@ -3610,6 +3630,41 @@ JS;
         $session = $this->get_wc_session();
         if ( $session ) {
             $session->set( "sovos_quote_$key", $response );
+        }
+    }
+
+    /** 🔐 Quote lock to avoid duplicate outbound calls for the same cart/address */
+    protected function get_quote_lock() {
+        $session = $this->get_wc_session();
+        $lock    = $session ? $session->get( 'sovos_quote_lock' ) : false;
+
+        if ( ! is_array( $lock ) || empty( $lock['key'] ) || empty( $lock['ts'] ) ) {
+            return false;
+        }
+
+        // Expire stale locks (default 5s)
+        if ( time() - (int) $lock['ts'] > 5 ) {
+            $this->clear_quote_lock();
+            return false;
+        }
+
+        return $lock;
+    }
+
+    protected function set_quote_lock( string $key ): void {
+        $session = $this->get_wc_session();
+        if ( $session ) {
+            $session->set( 'sovos_quote_lock', [
+                'key' => $key,
+                'ts'  => time(),
+            ] );
+        }
+    }
+
+    protected function clear_quote_lock(): void {
+        $session = $this->get_wc_session();
+        if ( $session ) {
+            $session->__unset( 'sovos_quote_lock' );
         }
     }
 
