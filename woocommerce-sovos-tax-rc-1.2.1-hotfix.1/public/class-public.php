@@ -1248,6 +1248,7 @@ JS;
      * @return array|bool Sovos response array on success, false on failure.
      */
     public function quote_tax( $line_items ) {
+        static $runtime_locks = [];
 
         if ( $this->is_exempt_via_session_or_order() )
             return false;
@@ -1265,13 +1266,14 @@ JS;
             return $cached;
         }
 
-        // If another request is already working on this cache key, avoid a duplicate outbound call.
-        if ( $this->has_active_quote_lock( $lock_key ) ) {
+        // If another request (or another handler in the same request) is already working on this cache key, avoid a duplicate outbound call.
+        if ( isset( $runtime_locks[ $lock_key ] ) || $this->has_active_quote_lock( $lock_key ) ) {
             $cached = $this->wait_for_cached_quote( $cache_key );
             return $cached ? $cached : false;
         }
 
         // Acquire the lock for this key.
+        $runtime_locks[ $lock_key ] = true;
         if ( ! $this->acquire_quote_lock( $lock_key ) ) {
             $cached = $this->wait_for_cached_quote( $cache_key );
             return $cached ? $cached : false;
@@ -1283,6 +1285,7 @@ JS;
         $tax_service = $this->prepare_tax_service( $line_items );
         if ( ! $tax_service ) {
             $this->clear_quote_lock( $lock_key );
+            unset( $runtime_locks[ $lock_key ] );
             return false;                           // prerequisites not met
         }
 
@@ -1290,6 +1293,7 @@ JS;
             $response = $tax_service->quoteTax();       // live Sovos call
         } catch ( \Throwable $e ) {
             $this->clear_quote_lock( $lock_key );
+            unset( $runtime_locks[ $lock_key ] );
             throw $e;
         } finally {
             $tax_service->clearTaxService();            // tidy up
@@ -1304,6 +1308,7 @@ JS;
         * ──────────────────────────────── */
         $this->set_cached_quote( $cache_key, $response );
         $this->clear_quote_lock( $lock_key );
+        unset( $runtime_locks[ $lock_key ] );
 
         return $response;
     }
