@@ -1220,20 +1220,62 @@ JS;
 
     /**
      * Shared access point for a Sovos quote, preferring cached data.
+     * GUARANTEES at most one live Sovos call per cache key.
      */
     protected function get_or_create_shared_quote( $line_items, $order = null ) {
-        if ( $this->is_exempt_via_session_or_order( $order ) )
+        if ( $this->is_exempt_via_session_or_order( $order ) ) {
             return false;
+        }
 
-        $response = $this->get_cached_quote_from_order( $order );
+        // 1) Order-level cache always wins.
+        if ( $order instanceof \WC_Order ) {
+            $cached = $this->get_cached_quote_from_order( $order );
+            if ( $cached ) {
+                return $cached;
+            }
+        }
 
-        if ( ! $response )
-            $response = $this->get_cached_quote_from_session( $line_items );
+        // 2) Build deterministic cache key + lock key.
+        $cache_key = $this->generate_cache_key( $line_items );
+        $lock_key  = $this->get_quote_lock_key( $cache_key );
 
-        if ( ! $response )
+        // 3) Session / transient cache.
+        $cached = $this->get_cached_quote( $cache_key );
+        if ( $cached ) {
+            return $cached;
+        }
+
+        // 4) If another request is already quoting, wait for it.
+        if ( $this->has_active_quote_lock( $lock_key ) ) {
+            $waited = $this->wait_for_cached_quote( $cache_key );
+            return $waited ?: false;
+        }
+
+        // 5) Acquire lock before calling Sovos.
+        if ( ! $this->acquire_quote_lock( $lock_key ) ) {
+            $waited = $this->wait_for_cached_quote( $cache_key );
+            return $waited ?: false;
+        }
+
+        try {
+            // 6) Single live Sovos call.
             $response = $this->quote_tax( $line_items );
 
-        return $this->is_valid_quote_response( $response ) ? $response : false;
+            if ( $this->is_valid_quote_response( $response ) ) {
+                $this->set_cached_quote( $cache_key, $response );
+
+                if ( $order instanceof \WC_Order ) {
+                    $this->persist_quote_on_order( $order, $response );
+                }
+
+                return $response;
+            }
+
+            return false;
+        } finally {
+            // 7) Always release lock.
+            $this->clear_quote_lock( $lock_key );
+        }
     }
 
     /**
@@ -1246,76 +1288,35 @@ JS;
     /**
      * Quote (estimate) tax for the current cart / order lines.
      *
-     * Adds a simple Woo‑session cache so we don’t hammer Sovos with
-     * identical requests during the same checkout visit.
-     *
      * @param array $line_items Cart or order items.
      * @return array|bool Sovos response array on success, false on failure.
      */
     public function quote_tax( $line_items ) {
-        static $runtime_locks = [];
-
-        if ( $this->is_exempt_via_session_or_order() )
+        if ( $this->is_exempt_via_session_or_order() ) {
             return false;
-
-        /* ────────────────────────────────
-        *  NEW: session‑level cache check
-        * ──────────────────────────────── */
-        $cache_key = $this->generate_cache_key( $line_items ); // 32‑char MD5
-        $lock_key  = $this->get_quote_lock_key( $cache_key );
-        $cached    = $this->get_cached_quote( $cache_key );
-
-        // If we’ve already quoted this exact cart + address combo,
-        // short‑circuit and hand back the stored response.
-        if ( $cached ) {
-            return $cached;
         }
 
-        // If another request (or another handler in the same request) is already working on this cache key, avoid a duplicate outbound call.
-        if ( isset( $runtime_locks[ $lock_key ] ) || $this->has_active_quote_lock( $lock_key ) ) {
-            $cached = $this->wait_for_cached_quote( $cache_key );
-            return $cached ? $cached : false;
-        }
-
-        // Acquire the lock for this key.
-        $runtime_locks[ $lock_key ] = true;
-        if ( ! $this->acquire_quote_lock( $lock_key ) ) {
-            $cached = $this->wait_for_cached_quote( $cache_key );
-            return $cached ? $cached : false;
-        }
-
-        /* ────────────────────────────────
-        *  ORIGINAL logic starts here
-        * ──────────────────────────────── */
         $tax_service = $this->prepare_tax_service( $line_items );
         if ( ! $tax_service ) {
-            $this->clear_quote_lock( $lock_key );
-            unset( $runtime_locks[ $lock_key ] );
             return false;                           // prerequisites not met
         }
 
         try {
             $response = $tax_service->quoteTax();       // live Sovos call
         } catch ( \Throwable $e ) {
-            $this->clear_quote_lock( $lock_key );
-            unset( $runtime_locks[ $lock_key ] );
             throw $e;
         } finally {
             $tax_service->clearTaxService();            // tidy up
         }
 
-        // Existing diagnostics / storage
-        $this->log_response( [ 'response' => $response ] );
-        $this->store_response_in_session( $response );
+        // Diagnostics / storage.
+        if ( $this->is_valid_quote_response( $response ) ) {
+            $this->log_response( [ 'response' => $response ] );
+            $this->store_response_in_session( $response );
+            return $response;
+        }
 
-        /* ────────────────────────────────
-        *  NEW: cache the fresh response
-        * ──────────────────────────────── */
-        $this->set_cached_quote( $cache_key, $response );
-        $this->clear_quote_lock( $lock_key );
-        unset( $runtime_locks[ $lock_key ] );
-
-        return $response;
+        return false;
     }
 
 
@@ -2703,7 +2704,7 @@ JS;
      */
     public function set_tax_rates( $line_items, $type_of_items = null ) {
 
-        $response = $this->quote_tax( $line_items );
+        $response = $this->get_or_create_shared_quote( $line_items );
 
         // Check if the response is valid.
         if ( $response['success'] && isset( $response['data']['lnRslts'] ) ) :
