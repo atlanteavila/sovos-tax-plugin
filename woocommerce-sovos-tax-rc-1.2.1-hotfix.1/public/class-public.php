@@ -154,6 +154,7 @@ class Woo_Sovos_Public {
     let lastAddressKey = null;
     let lastCompleteness = false;
     let addressPollTimer = null;
+    let debounceTimer = null;
 
     const fieldFilled = (selector, options = {}) => {
         const { minLength = 1 } = options;
@@ -321,6 +322,16 @@ class Woo_Sovos_Public {
         startAddressPolling();
     };
 
+    const debouncedHandleAddressChange = (delayMs = 250) => {
+        if (debounceTimer) {
+            clearTimeout(debounceTimer);
+        }
+        debounceTimer = setTimeout(() => {
+            debounceTimer = null;
+            handleAddressChange();
+        }, delayMs);
+    };
+
     const watchAddressChanges = () => {
         const selectors = [
             '#billing_country',
@@ -337,7 +348,8 @@ class Woo_Sovos_Public {
         ];
 
         selectors.forEach((selector) => {
-            $(document.body).on('change keyup', selector, handleAddressChange);
+            $(document.body).on('change', selector, handleAddressChange);
+            $(document.body).on('keyup', selector, () => debouncedHandleAddressChange());
         });
 
         $(document.body).on('updated_checkout wc_address_i18n_ready', handleAddressChange);
