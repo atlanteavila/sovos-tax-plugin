@@ -121,6 +121,38 @@ class Woo_Sovos_Public {
         $file = 'public/assets/js/scripts.js';
         wp_enqueue_script( $this->plugin_name, WOO_SOVOS_URI . $file, ['jquery'], $this->cache_bust_version( WOO_SOVOS_PATH . $file ), false );
 
+        wp_localize_script(
+            $this->plugin_name,
+            'sovosQuoteData',
+            [
+                'ajaxUrl' => admin_url( 'admin-ajax.php' ),
+                'nonce'   => wp_create_nonce( 'woo_sovos_quote' ),
+                'isFresh' => $this->is_quote_fresh(),
+                'isExempt'=> $this->is_exempt_via_session_or_order(),
+                'labels'  => [
+                    'calculate'   => __( 'Calculate Taxes', WOO_SOVOS_DOMAIN ),
+                    'calculating' => __( 'Calculating…', WOO_SOVOS_DOMAIN ),
+                    'error'       => __( 'Unable to calculate taxes. Please verify the shipping address.', WOO_SOVOS_DOMAIN ),
+                ],
+            ]
+        );
+
+    }
+
+    /**
+     * Output the Calculate Taxes button beneath the shipping form.
+     */
+    public function render_calculate_taxes_button() {
+        ?>
+        <div class="sovos-calc-taxes-wrap">
+            <button type="button" class="button alt sovos-calc-taxes">
+                <?php echo esc_html__( 'Calculate Taxes', WOO_SOVOS_DOMAIN ); ?>
+            </button>
+            <p class="sovos-calc-taxes-help">
+                <?php echo esc_html__( 'Update your shipping details, then calculate taxes to re-enable checkout.', WOO_SOVOS_DOMAIN ); ?>
+            </p>
+        </div>
+        <?php
     }
 
     /**
@@ -194,6 +226,32 @@ class Woo_Sovos_Public {
             return false;
 
         return  WC()->session;
+    }
+
+    /**
+     * Persist whether the Sovos quote is fresh or stale.
+     */
+    protected function set_quote_state( bool $is_fresh ): void {
+        $session = $this->get_wc_session();
+
+        if ( ! $session ) {
+            return;
+        }
+
+        $session->set( 'sovos_quote_fresh', $is_fresh );
+    }
+
+    /**
+     * Read the Sovos quote freshness flag.
+     */
+    protected function is_quote_fresh(): bool {
+        $session = $this->get_wc_session();
+
+        if ( ! $session ) {
+            return false;
+        }
+
+        return (bool) $session->get( 'sovos_quote_fresh', false );
     }
 
     /**
@@ -805,6 +863,60 @@ class Woo_Sovos_Public {
     }
 
     /**
+     * AJAX: Mark the Sovos quote as stale when checkout data changes.
+     */
+    public function ajax_mark_quote_stale() {
+        check_ajax_referer( 'woo_sovos_quote', 'security' );
+
+        $this->set_quote_state( false );
+
+        wp_send_json_success( [ 'fresh' => false ] );
+    }
+
+    /**
+     * AJAX: Request a fresh Sovos quote for the current cart.
+     */
+    public function ajax_refresh_quote() {
+        check_ajax_referer( 'woo_sovos_quote', 'security' );
+
+        $cart = $this->get_cart();
+        if ( ! $cart ) {
+            $this->set_quote_state( false );
+            wp_send_json_error( [ 'message' => __( 'Cart not available for tax calculation.', WOO_SOVOS_DOMAIN ) ] );
+        }
+
+        $line_items = $cart->get_cart();
+        if ( empty( $line_items ) ) {
+            $this->set_quote_state( false );
+            wp_send_json_error( [ 'message' => __( 'Cart is empty. Add items before calculating taxes.', WOO_SOVOS_DOMAIN ) ] );
+        }
+
+        $response = $this->quote_tax( $line_items );
+
+        if ( $this->is_valid_quote_response( $response ) ) {
+            $this->set_quote_state( true );
+            wp_send_json_success( [ 'fresh' => true ] );
+        }
+
+        $this->set_quote_state( false );
+
+        wp_send_json_error( [ 'message' => __( 'Unable to calculate taxes with the provided shipping address.', WOO_SOVOS_DOMAIN ) ] );
+    }
+
+    /**
+     * Sync the posted quote state onto the session during checkout AJAX.
+     */
+    public function capture_quote_state_from_request() {
+        $state = isset( $_POST['sovos_quote_state'] ) ? sanitize_text_field( wp_unslash( $_POST['sovos_quote_state'] ) ) : '';
+
+        if ( 'fresh' === $state ) {
+            $this->set_quote_state( true );
+        } elseif ( 'stale' === $state ) {
+            $this->set_quote_state( false );
+        }
+    }
+
+    /**
      * Retrieve the cached quote from the Woo session.
      */
     protected function get_cached_quote_from_session( $line_items = null ) {
@@ -899,6 +1011,7 @@ class Woo_Sovos_Public {
         // If we’ve already quoted this exact cart + address combo,
         // short‑circuit and hand back the stored response.
         if ( $cached ) {
+            $this->set_quote_state( true );
             return $cached;
         }
 
@@ -907,6 +1020,7 @@ class Woo_Sovos_Public {
         * ──────────────────────────────── */
         $tax_service = $this->prepare_tax_service( $line_items );
         if ( ! $tax_service ) {
+            $this->set_quote_state( false );
             return false;                           // prerequisites not met
         }
 
@@ -921,6 +1035,8 @@ class Woo_Sovos_Public {
         *  NEW: cache the fresh response
         * ──────────────────────────────── */
         $this->set_cached_quote( $cache_key, $response );
+
+        $this->set_quote_state( $this->is_valid_quote_response( $response ) );
 
         return $response;
     }
@@ -2276,6 +2392,19 @@ class Woo_Sovos_Public {
     }
 
     /**
+     * Require a fresh Sovos quote before checkout submission.
+     */
+    public function enforce_fresh_quote_before_checkout() {
+        if ( $this->is_exempt_via_session_or_order() )
+            return;
+
+        if ( $this->is_quote_fresh() )
+            return;
+
+        wc_add_notice( __( 'Please calculate taxes before placing your order.', WOO_SOVOS_DOMAIN ), 'error' );
+    }
+
+    /**
      * Add Tax Notice to Cart
      * 
      * @param string - $tax_total_html The tax total HTML.
@@ -2507,6 +2636,12 @@ class Woo_Sovos_Public {
         $is_ajax = defined('DOING_AJAX') && DOING_AJAX && isset($_POST['action']) && $_POST['action'] === 'woocommerce_update_order_review';
         $is_admin = is_admin();
         $log(sprintf('FLAGS: checkout=%d ajax=%d admin=%d', $is_checkout ? 1 : 0, $is_ajax ? 1 : 0, $is_admin ? 1 : 0));
+
+        $is_checkout_context = $is_checkout || $is_ajax;
+        if ( $is_checkout_context && ! $this->is_quote_fresh() ) {
+            $log('EARLY RETURN: quote marked stale');
+            return $original_tax_rates;
+        }
 
         if (!$is_checkout && !$is_ajax && !$is_admin) {
             $log('EARLY RETURN: not checkout/ajax/admin');
@@ -3271,6 +3406,8 @@ class Woo_Sovos_Public {
                     $session->__unset( $key );
                 }
             }
+
+            $session->set( 'sovos_quote_fresh', false );
         } catch ( Exception $e ) {
             error_log("Exception while clearing tax quote cache: " . $e->getMessage());
         }

@@ -140,6 +140,10 @@ class Woo_Sovos_Plugin {
         // Enqueue styles.
         $this->loader->add_action('wp_enqueue_scripts', $public, 'enqueue_styles');
 
+        // Insert checkout UI helpers.
+        $this->loader->add_action('woocommerce_after_checkout_shipping_form', $public, 'render_calculate_taxes_button');
+        $this->loader->add_action('woocommerce_checkout_update_order_review', $public, 'capture_quote_state_from_request');
+
         // Add Sovos Transaction ID Tax to New Order (note-only; does not persist tax).
         $this->loader->add_action('woocommerce_new_order', $public, 'add_sovos_transaction_id_to_new_order', 10, 2);
 
@@ -198,6 +202,13 @@ class Woo_Sovos_Plugin {
         $this->loader->add_filter('woocommerce_get_sections_tax', $public, 'hide_api_orders_tax_class_from_tax_options');
         $this->loader->add_filter('woocommerce_tax_settings', $public, 'hide_api_orders_tax_class_from_additional_tax_classes');
         $this->loader->add_filter('woocommerce_tax_rate_added', $public, 'ensure_api_tax_class_remains_empty', 10, 2);
+
+        // Quote freshness + AJAX endpoints
+        $this->loader->add_action('wp_ajax_sovos_mark_quote_stale', $public, 'ajax_mark_quote_stale');
+        $this->loader->add_action('wp_ajax_nopriv_sovos_mark_quote_stale', $public, 'ajax_mark_quote_stale');
+        $this->loader->add_action('wp_ajax_sovos_refresh_quote', $public, 'ajax_refresh_quote');
+        $this->loader->add_action('wp_ajax_nopriv_sovos_refresh_quote', $public, 'ajax_refresh_quote');
+        $this->loader->add_action('woocommerce_checkout_process', $public, 'enforce_fresh_quote_before_checkout');
     }
 
 
