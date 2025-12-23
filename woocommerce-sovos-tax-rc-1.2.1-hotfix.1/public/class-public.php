@@ -155,6 +155,7 @@ class Woo_Sovos_Public {
     let addressPollTimer = null;
     let debounceTimer = null;
     let isUpdatingCheckout = false;
+    let lastUpdateTimestamp = 0;
     let dirtyBilling = false;
     let dirtyShipping = false;
 
@@ -248,9 +249,13 @@ class Woo_Sovos_Public {
     };
 
     const forceUpdate = () => {
-        if (isUpdatingCheckout) {
+        const now = Date.now();
+        const cooldownMs = 1200;
+
+        if (isUpdatingCheckout || now - lastUpdateTimestamp < cooldownMs) {
             return;
         }
+        lastUpdateTimestamp = now;
         isUpdatingCheckout = true;
         allowImmediate = true;
         try {
