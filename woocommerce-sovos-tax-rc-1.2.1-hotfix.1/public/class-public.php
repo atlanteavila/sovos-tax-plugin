@@ -70,6 +70,11 @@ class Woo_Sovos_Public {
     protected $runtime_quote_cache = [];
 
     /**
+     * In-request in-flight guard to prevent recursive quote calls per cache key.
+     */
+    protected $runtime_quote_inflight = [];
+
+    /**
      * Construct.
      * 
      * @since   1.0.0
@@ -1239,10 +1244,22 @@ JS;
         $cache_key = $this->generate_cache_key( $line_items );
         $lock_key  = $this->get_quote_lock_key( $cache_key );
 
+        $this->log_quote_event( 'before_cache', [
+            'cache_key'  => $cache_key,
+            'has_runtime'=> isset( $this->runtime_quote_cache[ $cache_key ] ) ? 1 : 0,
+            'has_lock'   => $this->has_active_quote_lock( $lock_key ) ? 1 : 0,
+        ] );
+
         // 3) Session / transient cache.
         $cached = $this->get_cached_quote( $cache_key );
         if ( $cached ) {
+            $this->log_quote_event( 'cache_hit', [ 'cache_key' => $cache_key ] );
             return $cached;
+        }
+
+        if ( ! empty( $this->runtime_quote_inflight[ $cache_key ] ) ) {
+            $this->log_quote_event( 'inflight_same_request', [ 'cache_key' => $cache_key ] );
+            return $this->get_cached_quote( $cache_key ) ?: false;
         }
 
         // 4) If another request is already quoting, wait for it.
@@ -1258,6 +1275,7 @@ JS;
         }
 
         try {
+            $this->runtime_quote_inflight[ $cache_key ] = true;
             // 6) Single live Sovos call.
             $response = $this->quote_tax( $line_items );
 
@@ -1273,6 +1291,7 @@ JS;
 
             return false;
         } finally {
+            unset( $this->runtime_quote_inflight[ $cache_key ] );
             // 7) Always release lock.
             $this->clear_quote_lock( $lock_key );
         }
@@ -1302,6 +1321,9 @@ JS;
         }
 
         try {
+            $this->log_quote_event( 'LIVE_CALL', [
+                'cache_key' => is_array( $line_items ) ? $this->generate_cache_key( $line_items ) : 'n/a',
+            ] );
             $response = $tax_service->quoteTax();       // live Sovos call
         } catch ( \Throwable $e ) {
             throw $e;
@@ -1714,7 +1736,6 @@ JS;
                 $sovos_tax['tax_rate'] = $tax_rate;
                 $sovos_tax['_tax_quoted'] = true;
                 $line_item->update_meta_data('_sovos_tax', $sovos_tax);
-                $line_item->save_meta_data();
             }
 
             // Return the updated item in the collection
@@ -3552,7 +3573,6 @@ JS;
 
         $coupons          = [];
         $fees             = [];
-        $line_tax_classes = [];
 
         if ( $cart ) {
             $coupons = array_values( $cart->get_applied_coupons() );
@@ -3576,20 +3596,11 @@ JS;
             $customer_roles = (array) $user->roles;
         }
 
-        $tax_class_markers = [
-            'session_original_tax_class' => $session ? $session->get( 'original_tax_class' ) : null,
-            'using_original_tax_class'   => $session ? $session->get( 'use_original_tax_class' ) : null,
-            'customer_tax_class'         => ( $customer && method_exists( $customer, 'get_tax_class' ) ) ? $customer->get_tax_class() : null,
-            'customer_vat_exempt'        => ( $customer && method_exists( $customer, 'get_is_vat_exempt' ) ) ? $customer->get_is_vat_exempt() : null,
-        ];
-
         $line_items_payload = array_map(
-            static function ( $item ) use ( &$line_tax_classes ) {
+            static function ( $item ) {
                 $product_id = is_array( $item ) ? $item['data']->get_id() : $item->get_product_id();
                 $quantity   = is_array( $item ) ? $item['quantity']       : $item->get_quantity();
                 $tax_class  = is_array( $item ) ? $item['data']->get_tax_class() : $item->get_tax_class();
-
-                $line_tax_classes[] = $tax_class;
 
                 return [
                     'id'        => $product_id,
@@ -3611,7 +3622,6 @@ JS;
             'fees'          => $fees,
             'customer'      => [
                 'roles'       => $customer_roles,
-                'tax_markers' => $tax_class_markers,
             ],
             'exemption'     => [
                 'product_flags'       => $exemption_context['product_flags'],
@@ -3620,12 +3630,23 @@ JS;
                 'email_exempt'        => $exemption_context['email_exempt'],
                 'email'               => $exemption_context['email'],
                 'allowlist_hash'      => $exemption_context['allowlist_hash'],
-                'session_exempt'      => $session ? $session->get( 'sovos_is_exempt' ) : null,
             ],
-            'line_classes'  => $line_tax_classes,
         ];
 
         return md5( wp_json_encode( $payload ) );     // 32‑char cache key
+    }
+
+    protected function log_quote_event( string $stage, array $context = [] ): void {
+        if ( ! function_exists( 'wc_get_logger' ) ) {
+            return;
+        }
+
+        $context['stage'] = $stage;
+        $context['bt']    = function_exists( 'wp_debug_backtrace_summary' )
+            ? wp_debug_backtrace_summary( null, 6, false )
+            : 'no_bt';
+
+        wc_get_logger()->info( 'SOVOS QUOTE ' . wp_json_encode( $context ), [ 'source' => 'sovos' ] );
     }
 
     /** Read / write helpers around WC()->session */
