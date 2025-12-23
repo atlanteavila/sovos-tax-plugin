@@ -333,23 +333,25 @@ class Woo_Sovos_Public {
     };
 
     const addSaveButtons = () => {
-        const billingContainer = $('.woocommerce-billing-fields');
-        if (billingContainer.length && !billingContainer.find('.sovos-save-billing').length) {
-            const billingBtn = $('<button type="button" class="button sovos-save-billing" style="margin-top:8px">Save billing address to refresh tax</button>');
-            billingBtn.on('click', () => saveAddressAndUpdate('billing'));
-            billingContainer.append(billingBtn);
+        // Use the existing billing save button if present.
+        const billingSaveBtn = $('#toggle-billing-details');
+        if (billingSaveBtn.length) {
+            billingSaveBtn.off('click.sovosSave').on('click.sovosSave', () => saveAddressAndUpdate('billing'));
         }
 
         const shippingContainer = $('.woocommerce-shipping-fields');
         const ensureShippingButton = () => {
+            const existing = shippingContainer.find('.sovos-save-shipping');
             if (!isShippingDifferent()) {
-                shippingContainer.find('.sovos-save-shipping').remove();
+                existing.remove();
                 return;
             }
-            if (shippingContainer.length && !shippingContainer.find('.sovos-save-shipping').length) {
-                const shippingBtn = $('<button type="button" class="button sovos-save-shipping" style="margin-top:8px">Save shipping address to refresh tax</button>');
+            if (shippingContainer.length && !existing.length) {
+                const shippingBtn = $('<button type="button" class="button sovos-save-shipping" style="margin-top:8px">Save shipping address</button>');
                 shippingBtn.on('click', () => saveAddressAndUpdate('shipping'));
                 shippingContainer.append(shippingBtn);
+            } else {
+                existing.text('Save shipping address');
             }
         };
 
