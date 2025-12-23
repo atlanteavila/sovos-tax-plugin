@@ -154,6 +154,7 @@ class Woo_Sovos_Public {
     let lastCompleteness = false;
     let addressPollTimer = null;
     let debounceTimer = null;
+    let isUpdatingCheckout = false;
     let dirtyBilling = false;
     let dirtyShipping = false;
 
@@ -247,6 +248,10 @@ class Woo_Sovos_Public {
     };
 
     const forceUpdate = () => {
+        if (isUpdatingCheckout) {
+            return;
+        }
+        isUpdatingCheckout = true;
         allowImmediate = true;
         try {
             originalTrigger.call($(document.body), 'update_checkout');
@@ -336,7 +341,11 @@ class Woo_Sovos_Public {
         // Use the existing billing save button if present.
         const billingSaveBtn = $('#toggle-billing-details');
         if (billingSaveBtn.length) {
-            billingSaveBtn.off('click.sovosSave').on('click.sovosSave', () => saveAddressAndUpdate('billing'));
+            billingSaveBtn.off('click.sovosSave').on('click.sovosSave', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                saveAddressAndUpdate('billing');
+            });
         }
 
         const shippingContainer = $('.woocommerce-shipping-fields');
@@ -348,7 +357,11 @@ class Woo_Sovos_Public {
             }
             if (shippingContainer.length && !existing.length) {
                 const shippingBtn = $('<button type="button" class="button sovos-save-shipping" style="margin-top:8px">Save shipping address</button>');
-                shippingBtn.on('click', () => saveAddressAndUpdate('shipping'));
+                shippingBtn.on('click', (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    saveAddressAndUpdate('shipping');
+                });
                 shippingContainer.append(shippingBtn);
             } else {
                 existing.text('Save shipping address');
@@ -452,6 +465,11 @@ class Woo_Sovos_Public {
         // Capture initial state (including values filled by WooCommerce after DOM ready) and trigger an update if needed.
         scheduleInitialRechecks();
         syncPlaceOrderButton();
+
+        // Clear in-flight guard when WooCommerce finishes or errors.
+        $(document.body).on('updated_checkout checkout_error', () => {
+            isUpdatingCheckout = false;
+        });
     });
 })(jQuery);
 JS;
