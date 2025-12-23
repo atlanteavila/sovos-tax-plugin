@@ -3622,6 +3622,15 @@ JS;
         $session = $this->get_wc_session();
         $response = $session ? $session->get( "sovos_quote_$key" ) : false;
 
+        if ( ! $this->is_valid_quote_response( $response ) ) {
+            // Fallback to transient in case WC session is not yet populated.
+            $response = get_transient( $this->get_quote_response_transient_key( $key ) );
+            if ( $this->is_valid_quote_response( $response ) && $session ) {
+                // Rehydrate session cache for subsequent requests.
+                $session->set( "sovos_quote_$key", $response );
+            }
+        }
+
         return $this->is_valid_quote_response( $response ) ? $response : false;
     }
 
@@ -3633,7 +3642,19 @@ JS;
         $session = $this->get_wc_session();
         if ( $session ) {
             $session->set( "sovos_quote_$key", $response );
+            // Track keys so we can clear transients later.
+            $keys = $session->get( 'sovos_quote_keys' );
+            if ( ! is_array( $keys ) ) {
+                $keys = [];
+            }
+            if ( ! in_array( $key, $keys, true ) ) {
+                $keys[] = $key;
+                $session->set( 'sovos_quote_keys', $keys );
+            }
         }
+
+        // Always write a transient so concurrent PHP requests see the cached response even before WC session hydration.
+        set_transient( $this->get_quote_response_transient_key( $key ), $response, 5 * MINUTE_IN_SECONDS );
     }
 
     /**
@@ -3642,6 +3663,10 @@ JS;
      */
     protected function get_quote_lock_key( string $cache_key ): string {
         return "sovos_quote_lock_$cache_key";
+    }
+
+    protected function get_quote_response_transient_key( string $cache_key ): string {
+        return "sovos_quote_resp_$cache_key";
     }
 
     protected function has_active_quote_lock( string $lock_key ): bool {
@@ -3701,11 +3726,21 @@ JS;
         }
     
         try {
+            // Clear session-scoped caches.
             foreach ( $data as $key => $value ) {
                 if ( strpos( $key, 'sovos_quote_' ) === 0 ) {
                     $session->__unset( $key );
                 }
             }
+
+            // Clear transient response caches using tracked keys.
+            $tracked_keys = $session->get( 'sovos_quote_keys' );
+            if ( is_array( $tracked_keys ) ) {
+                foreach ( $tracked_keys as $tracked_key ) {
+                    delete_transient( $this->get_quote_response_transient_key( $tracked_key ) );
+                }
+            }
+            $session->__unset( 'sovos_quote_keys' );
         } catch ( Exception $e ) {
             error_log("Exception while clearing tax quote cache: " . $e->getMessage());
         }
