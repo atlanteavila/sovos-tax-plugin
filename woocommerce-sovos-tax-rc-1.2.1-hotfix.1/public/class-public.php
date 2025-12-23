@@ -1256,6 +1256,7 @@ JS;
         *  NEW: session‑level cache check
         * ──────────────────────────────── */
         $cache_key = $this->generate_cache_key( $line_items ); // 32‑char MD5
+        $lock_key  = $this->get_quote_lock_key( $cache_key );
         $cached    = $this->get_cached_quote( $cache_key );
 
         // If we’ve already quoted this exact cart + address combo,
@@ -1265,28 +1266,30 @@ JS;
         }
 
         // If another request is already working on this cache key, avoid a duplicate outbound call.
-        $lock = $this->get_quote_lock();
-        if ( $lock && isset( $lock['key'] ) && $lock['key'] === $cache_key ) {
-            $inflight = $this->get_cached_quote( $cache_key );
-            return $inflight ? $inflight : false;
+        if ( $this->has_active_quote_lock( $lock_key ) ) {
+            $cached = $this->wait_for_cached_quote( $cache_key );
+            return $cached ? $cached : false;
         }
 
         // Acquire the lock for this key.
-        $this->set_quote_lock( $cache_key );
+        if ( ! $this->acquire_quote_lock( $lock_key ) ) {
+            $cached = $this->wait_for_cached_quote( $cache_key );
+            return $cached ? $cached : false;
+        }
 
         /* ────────────────────────────────
         *  ORIGINAL logic starts here
         * ──────────────────────────────── */
         $tax_service = $this->prepare_tax_service( $line_items );
         if ( ! $tax_service ) {
-            $this->clear_quote_lock();
+            $this->clear_quote_lock( $lock_key );
             return false;                           // prerequisites not met
         }
 
         try {
             $response = $tax_service->quoteTax();       // live Sovos call
         } catch ( \Throwable $e ) {
-            $this->clear_quote_lock();
+            $this->clear_quote_lock( $lock_key );
             throw $e;
         } finally {
             $tax_service->clearTaxService();            // tidy up
@@ -1300,7 +1303,7 @@ JS;
         *  NEW: cache the fresh response
         * ──────────────────────────────── */
         $this->set_cached_quote( $cache_key, $response );
-        $this->clear_quote_lock();
+        $this->clear_quote_lock( $lock_key );
 
         return $response;
     }
@@ -3633,39 +3636,56 @@ JS;
         }
     }
 
-    /** 🔐 Quote lock to avoid duplicate outbound calls for the same cart/address */
-    protected function get_quote_lock() {
-        $session = $this->get_wc_session();
-        $lock    = $session ? $session->get( 'sovos_quote_lock' ) : false;
+    /**
+     * 🔐 Quote locks to avoid duplicate outbound calls for the same cart/address.
+     * Uses a transient so concurrent PHP requests see the lock immediately.
+     */
+    protected function get_quote_lock_key( string $cache_key ): string {
+        return "sovos_quote_lock_$cache_key";
+    }
 
-        if ( ! is_array( $lock ) || empty( $lock['key'] ) || empty( $lock['ts'] ) ) {
+    protected function has_active_quote_lock( string $lock_key ): bool {
+        $lock = get_transient( $lock_key );
+        if ( ! is_array( $lock ) || empty( $lock['ts'] ) ) {
             return false;
         }
 
         // Expire stale locks (default 5s)
         if ( time() - (int) $lock['ts'] > 5 ) {
-            $this->clear_quote_lock();
+            $this->clear_quote_lock( $lock_key );
             return false;
         }
 
-        return $lock;
+        return true;
     }
 
-    protected function set_quote_lock( string $key ): void {
-        $session = $this->get_wc_session();
-        if ( $session ) {
-            $session->set( 'sovos_quote_lock', [
-                'key' => $key,
-                'ts'  => time(),
-            ] );
+    protected function acquire_quote_lock( string $lock_key ): bool {
+        if ( $this->has_active_quote_lock( $lock_key ) ) {
+            return false;
         }
+
+        // set_transient is shared across concurrent requests.
+        return (bool) set_transient( $lock_key, [ 'ts' => time() ], 10 );
     }
 
-    protected function clear_quote_lock(): void {
-        $session = $this->get_wc_session();
-        if ( $session ) {
-            $session->__unset( 'sovos_quote_lock' );
+    protected function clear_quote_lock( string $lock_key ): void {
+        delete_transient( $lock_key );
+    }
+
+    /**
+     * When a lock exists, wait briefly for the first request to populate the cache.
+     */
+    protected function wait_for_cached_quote( string $cache_key ) {
+        $attempts = 30; // ~3s total
+        while ( $attempts-- > 0 ) {
+            $cached = $this->get_cached_quote( $cache_key );
+            if ( $cached ) {
+                return $cached;
+            }
+            usleep( 100000 ); // 100ms
         }
+
+        return false;
     }
 
     public function clear_tax_quote_cache( $order_id ): void {    
