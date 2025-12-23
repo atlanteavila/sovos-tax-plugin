@@ -155,6 +155,8 @@ class Woo_Sovos_Public {
     let lastCompleteness = false;
     let addressPollTimer = null;
     let debounceTimer = null;
+    let dirtyBilling = false;
+    let dirtyShipping = false;
 
     const fieldFilled = (selector, options = {}) => {
         const { minLength = 1 } = options;
@@ -322,6 +324,76 @@ class Woo_Sovos_Public {
         startAddressPolling();
     };
 
+    const setDirty = (type, isDirty = true) => {
+        if (type === 'billing') {
+            dirtyBilling = isDirty;
+        } else if (type === 'shipping') {
+            dirtyShipping = isDirty;
+        }
+        syncPlaceOrderButton();
+    };
+
+    const syncPlaceOrderButton = () => {
+        const needsSave = dirtyBilling || (isShippingDifferent() && dirtyShipping);
+        const $placeOrder = $('#place_order');
+        if (!$placeOrder.length) {
+            return;
+        }
+        if (needsSave) {
+            $placeOrder.attr('disabled', 'disabled');
+        } else {
+            $placeOrder.removeAttr('disabled');
+        }
+    };
+
+    const showErrorNotice = (message) => {
+        $(document.body).trigger('checkout_error', [message]);
+    };
+
+    const saveAddressAndUpdate = (type) => {
+        if (type === 'billing' && !isBillingComplete()) {
+            showErrorNotice('Please complete your billing address before saving.');
+            return;
+        }
+
+        if (type === 'shipping' && isShippingDifferent() && !isShippingComplete()) {
+            showErrorNotice('Please complete your shipping address before saving.');
+            return;
+        }
+
+        setDirty(type, false);
+        forceUpdate();
+    };
+
+    const addSaveButtons = () => {
+        const billingContainer = $('.woocommerce-billing-fields');
+        if (billingContainer.length && !billingContainer.find('.sovos-save-billing').length) {
+            const billingBtn = $('<button type="button" class="button sovos-save-billing" style="margin-top:8px">Save billing address to refresh tax</button>');
+            billingBtn.on('click', () => saveAddressAndUpdate('billing'));
+            billingContainer.append(billingBtn);
+        }
+
+        const shippingContainer = $('.woocommerce-shipping-fields');
+        if (shippingContainer.length && !shippingContainer.find('.sovos-save-shipping').length) {
+            const shippingBtn = $('<button type="button" class="button sovos-save-shipping" style="margin-top:8px">Save shipping address to refresh tax</button>');
+            shippingBtn.on('click', () => saveAddressAndUpdate('shipping'));
+            shippingContainer.append(shippingBtn);
+        }
+    };
+
+    const blockPlaceOrderWhenDirty = () => {
+        const form = $('form.checkout');
+        form.on('submit', function (event) {
+            if (dirtyBilling || (isShippingDifferent() && dirtyShipping)) {
+                event.preventDefault();
+                showErrorNotice('Please save your address(es) to refresh tax before placing the order.');
+                syncPlaceOrderButton();
+                return false;
+            }
+            return true;
+        });
+    };
+
     const debouncedHandleAddressChange = (delayMs = 250) => {
         if (debounceTimer) {
             clearTimeout(debounceTimer);
@@ -350,11 +422,18 @@ class Woo_Sovos_Public {
         selectors.forEach((selector) => {
             $(document.body).on('change', selector, handleAddressChange);
             $(document.body).on('keyup', selector, () => debouncedHandleAddressChange());
+
+            if (selector.indexOf('billing_') !== -1) {
+                $(document.body).on('change keyup', selector, () => setDirty('billing'));
+            } else if (selector.indexOf('shipping_') !== -1) {
+                $(document.body).on('change keyup', selector, () => setDirty('shipping'));
+            }
         });
 
         $(document.body).on('updated_checkout wc_address_i18n_ready', handleAddressChange);
 
         $(document.body).on('change', '#ship-to-different-address-checkbox', () => {
+            setDirty('shipping', isShippingDifferent());
             handleAddressChange();
             startAddressPolling();
         });
@@ -397,9 +476,12 @@ class Woo_Sovos_Public {
     $(function () {
         registerManualTriggers();
         watchAddressChanges();
+        addSaveButtons();
+        blockPlaceOrderWhenDirty();
 
         // Capture initial state (including values filled by WooCommerce after DOM ready) and trigger an update if needed.
         scheduleInitialRechecks();
+        syncPlaceOrderButton();
     });
 })(jQuery);
 JS;
