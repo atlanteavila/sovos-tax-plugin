@@ -150,7 +150,6 @@ class Woo_Sovos_Public {
     }
 
     let allowImmediate = false;
-    let queuedUpdate = null;
     let lastAddressKey = null;
     let lastCompleteness = false;
     let addressPollTimer = null;
@@ -256,43 +255,11 @@ class Woo_Sovos_Public {
         }
     };
 
-    const flushPendingUpdate = () => {
-        if (!queuedUpdate || !canUpdateCheckout()) {
-            return;
-        }
-
-        const { context, args } = queuedUpdate;
-        queuedUpdate = null;
-
-        allowImmediate = true;
-        try {
-            originalTrigger.apply(context, args);
-        } finally {
-            allowImmediate = false;
-        }
-    };
-
-    const maybeQueueUpdate = (context, args) => {
-        if (allowImmediate || canUpdateCheckout()) {
-            return false;
-        }
-
-        queuedUpdate = { context, args };
-        return true;
-    };
-
     const handleAddressChange = () => {
         const addressKey = buildAddressKey();
         const complete = canUpdateCheckout();
         const becameComplete = complete && !lastCompleteness;
         const changedWhileComplete = complete && lastCompleteness && addressKey !== lastAddressKey;
-
-        flushPendingUpdate();
-
-        if (complete && (becameComplete || changedWhileComplete)) {
-            // Ensure a fresh recalculation even if no update was queued (or after a queued one was flushed).
-            forceUpdate();
-        }
 
         lastAddressKey = addressKey;
         lastCompleteness = complete;
@@ -374,11 +341,20 @@ class Woo_Sovos_Public {
         }
 
         const shippingContainer = $('.woocommerce-shipping-fields');
-        if (shippingContainer.length && !shippingContainer.find('.sovos-save-shipping').length) {
-            const shippingBtn = $('<button type="button" class="button sovos-save-shipping" style="margin-top:8px">Save shipping address to refresh tax</button>');
-            shippingBtn.on('click', () => saveAddressAndUpdate('shipping'));
-            shippingContainer.append(shippingBtn);
-        }
+        const ensureShippingButton = () => {
+            if (!isShippingDifferent()) {
+                shippingContainer.find('.sovos-save-shipping').remove();
+                return;
+            }
+            if (shippingContainer.length && !shippingContainer.find('.sovos-save-shipping').length) {
+                const shippingBtn = $('<button type="button" class="button sovos-save-shipping" style="margin-top:8px">Save shipping address to refresh tax</button>');
+                shippingBtn.on('click', () => saveAddressAndUpdate('shipping'));
+                shippingContainer.append(shippingBtn);
+            }
+        };
+
+        ensureShippingButton();
+        $(document.body).on('change', '#ship-to-different-address-checkbox', ensureShippingButton);
     };
 
     const blockPlaceOrderWhenDirty = () => {
@@ -444,8 +420,8 @@ class Woo_Sovos_Public {
 
         registry.isBillingComplete = isBillingComplete;
         registry.isShippingComplete = isShippingComplete;
-        registry.hasPendingUpdate = () => !!queuedUpdate;
-        registry.flushPendingUpdate = flushPendingUpdate;
+        registry.hasPendingUpdate = () => false;
+        registry.flushPendingUpdate = () => {};
         registry.forceUpdate = forceUpdate;
 
         window.sovosDeferUpdateTriggers = registry;
@@ -456,19 +432,11 @@ class Woo_Sovos_Public {
         const eventType = args[0];
         const normalizedType = (eventType && eventType.type) ? eventType.type : eventType;
 
-        if (normalizedType === 'update_checkout' && this.is(document.body)) {
-            if (maybeQueueUpdate(this, args)) {
-                return this;
-            }
+        if (normalizedType === 'update_checkout' && this.is(document.body) && !allowImmediate) {
+            return this;
         }
 
-        const result = originalTrigger.apply(this, args);
-
-        if (normalizedType === 'update_checkout' && this.is(document.body)) {
-            queuedUpdate = null;
-        }
-
-        return result;
+        return originalTrigger.apply(this, args);
     };
 
     originalTrigger.__sovosDeferredApplied = true;
