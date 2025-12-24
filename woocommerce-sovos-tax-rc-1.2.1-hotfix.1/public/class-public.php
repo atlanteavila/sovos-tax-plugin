@@ -65,6 +65,16 @@ class Woo_Sovos_Public {
     protected $api_tax_class_slug = 'api-orders';
 
     /**
+     * In-request Sovos quote cache to prevent duplicate calls within the same PHP request.
+     */
+    protected $runtime_quote_cache = [];
+
+    /**
+     * In-request in-flight guard to prevent recursive quote calls per cache key.
+     */
+    protected $runtime_quote_inflight = [];
+
+    /**
      * Construct.
      * 
      * @since   1.0.0
@@ -120,6 +130,384 @@ class Woo_Sovos_Public {
         // Scripts.
         $file = 'public/assets/js/scripts.js';
         wp_enqueue_script( $this->plugin_name, WOO_SOVOS_URI . $file, ['jquery'], $this->cache_bust_version( WOO_SOVOS_PATH . $file ), false );
+
+    }
+
+    /**
+     * Gate checkout updates until the checkout form has enough data.
+     */
+    public function enqueue_checkout_gating_script() {
+        if ( ! function_exists( 'is_checkout' ) || ! is_checkout() ) {
+            return;
+        }
+
+        $checkout_handle = 'wc-checkout';
+
+        if ( ! wp_script_is( $checkout_handle, 'enqueued' ) ) {
+            return;
+        }
+
+        $inline_script = <<<'JS'
+(function ($) {
+    if (!$.fn.trigger || !document.body) {
+        return;
+    }
+
+    const originalTrigger = $.fn.trigger;
+
+    if (originalTrigger.__sovosDeferredApplied) {
+        return;
+    }
+
+    let allowImmediate = false;
+    let lastAddressKey = null;
+    let lastCompleteness = false;
+    let addressPollTimer = null;
+    let debounceTimer = null;
+    let isUpdatingCheckout = false;
+    let lastUpdateTimestamp = 0;
+    let dirtyBilling = false;
+    let dirtyShipping = false;
+
+    const fieldFilled = (selector, options = {}) => {
+        const { minLength = 1 } = options;
+        const field = $(selector);
+
+        if (!field.length) {
+            return true;
+        }
+
+        const value = typeof field.val() === 'string' ? field.val().trim() : '';
+        return value.length >= minLength;
+    };
+
+    const getPostcodeMinLength = (country) => {
+        switch ((country || '').toUpperCase()) {
+            case 'US':
+                return 5;
+            case 'CA':
+                return 3;
+            case 'AU':
+                return 4;
+            case 'GB':
+                return 3;
+            default:
+                return 3;
+        }
+    };
+
+    const getFieldValue = (selector) => {
+        const field = $(selector);
+        return field.length ? String(field.val() || '').trim() : '';
+    };
+
+    const isBillingComplete = () => {
+        const billingCountry = getFieldValue('#billing_country');
+        const postcodeMinLength = getPostcodeMinLength(billingCountry);
+
+        return [
+            '#billing_country',
+            '#billing_address_1',
+            '#billing_city',
+            '#billing_state'
+        ].every(fieldFilled) && fieldFilled('#billing_postcode', { minLength: postcodeMinLength });
+    };
+
+    const isShippingDifferent = () => $('#ship-to-different-address-checkbox').is(':checked');
+
+    const isShippingComplete = () => {
+        if (!isShippingDifferent()) {
+            return isBillingComplete();
+        }
+
+        const shippingCountry = getFieldValue('#shipping_country');
+        const postcodeMinLength = getPostcodeMinLength(shippingCountry);
+
+        return [
+            '#shipping_country',
+            '#shipping_address_1',
+            '#shipping_city',
+            '#shipping_state'
+        ].every(fieldFilled) && fieldFilled('#shipping_postcode', { minLength: postcodeMinLength });
+    };
+
+    const canUpdateCheckout = () => isBillingComplete() && isShippingComplete();
+
+    const buildAddressKey = () => {
+        const base = {
+            billing: {
+                country: getFieldValue('#billing_country'),
+                address1: getFieldValue('#billing_address_1'),
+                city: getFieldValue('#billing_city'),
+                state: getFieldValue('#billing_state'),
+                postcode: getFieldValue('#billing_postcode'),
+            },
+            shipToDifferent: isShippingDifferent(),
+        };
+
+        if (isShippingDifferent()) {
+            base.shipping = {
+                country: getFieldValue('#shipping_country'),
+                address1: getFieldValue('#shipping_address_1'),
+                city: getFieldValue('#shipping_city'),
+                state: getFieldValue('#shipping_state'),
+                postcode: getFieldValue('#shipping_postcode'),
+            };
+        }
+
+        return JSON.stringify(base);
+    };
+
+    const forceUpdate = () => {
+        const now = Date.now();
+        const cooldownMs = 1200;
+
+        if (isUpdatingCheckout || now - lastUpdateTimestamp < cooldownMs) {
+            return;
+        }
+        lastUpdateTimestamp = now;
+        isUpdatingCheckout = true;
+        allowImmediate = true;
+        try {
+            originalTrigger.call($(document.body), 'update_checkout');
+        } finally {
+            allowImmediate = false;
+        }
+    };
+
+    const handleAddressChange = () => {
+        const addressKey = buildAddressKey();
+        const complete = canUpdateCheckout();
+        const becameComplete = complete && !lastCompleteness;
+        const changedWhileComplete = complete && lastCompleteness && addressKey !== lastAddressKey;
+
+        lastAddressKey = addressKey;
+        lastCompleteness = complete;
+    };
+
+    const startAddressPolling = (durationMs = 8000, intervalMs = 250) => {
+        if (addressPollTimer) {
+            clearInterval(addressPollTimer);
+            addressPollTimer = null;
+        }
+
+        const start = Date.now();
+        addressPollTimer = setInterval(() => {
+            handleAddressChange();
+
+            if (Date.now() - start >= durationMs) {
+                clearInterval(addressPollTimer);
+                addressPollTimer = null;
+            }
+        }, intervalMs);
+    };
+
+    const scheduleInitialRechecks = () => {
+        const delays = [0, 150, 500];
+        delays.forEach((delay) => {
+            setTimeout(handleAddressChange, delay);
+        });
+
+        startAddressPolling();
+    };
+
+    const setDirty = (type, isDirty = true) => {
+        if (type === 'billing') {
+            dirtyBilling = isDirty;
+        } else if (type === 'shipping') {
+            dirtyShipping = isDirty;
+        }
+        syncPlaceOrderButton();
+    };
+
+    const syncPlaceOrderButton = () => {
+        const needsSave = dirtyBilling || (isShippingDifferent() && dirtyShipping);
+        const $placeOrder = $('#place_order');
+        if (!$placeOrder.length) {
+            return;
+        }
+        if (needsSave) {
+            $placeOrder.attr('disabled', 'disabled');
+        } else {
+            $placeOrder.removeAttr('disabled');
+        }
+    };
+
+    const showErrorNotice = (message) => {
+        $(document.body).trigger('checkout_error', [message]);
+    };
+
+    const ensureQuoteNonceField = (nonceValue) => {
+        const form = $('form.checkout');
+        if (!form.length) {
+            return;
+        }
+        let field = form.find('input[name="sovos_quote_nonce"]');
+        if (!field.length) {
+            field = $('<input type="hidden" name="sovos_quote_nonce" />');
+            form.append(field);
+        }
+        if (nonceValue) {
+            field.val(nonceValue);
+        }
+    };
+
+    const saveAddressAndUpdate = (type) => {
+        if (type === 'billing' && !isBillingComplete()) {
+            showErrorNotice('Please complete your billing address before saving.');
+            return;
+        }
+
+        if (type === 'shipping' && isShippingDifferent() && !isShippingComplete()) {
+            showErrorNotice('Please complete your shipping address before saving.');
+            return;
+        }
+
+        const quoteNonce = String(Date.now());
+        window.sovosQuoteNonce = quoteNonce;
+        ensureQuoteNonceField(quoteNonce);
+        setDirty(type, false);
+        forceUpdate();
+    };
+
+    const addSaveButtons = () => {
+        // Use the existing billing save button if present.
+        const billingSaveBtn = $('#toggle-billing-details');
+        if (billingSaveBtn.length) {
+            billingSaveBtn.off('click.sovosSave').on('click.sovosSave', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                saveAddressAndUpdate('billing');
+            });
+        }
+
+        const shippingContainer = $('.woocommerce-shipping-fields');
+        const ensureShippingButton = () => {
+            const existing = shippingContainer.find('.sovos-save-shipping');
+            if (!isShippingDifferent()) {
+                existing.remove();
+                return;
+            }
+            if (shippingContainer.length && !existing.length) {
+                const shippingBtn = $('<button type="button" class="button sovos-save-shipping" style="margin-top:8px">Save shipping address</button>');
+                shippingBtn.on('click', (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    saveAddressAndUpdate('shipping');
+                });
+                shippingContainer.append(shippingBtn);
+            } else {
+                existing.text('Save shipping address');
+            }
+        };
+
+        ensureShippingButton();
+        $(document.body).on('change', '#ship-to-different-address-checkbox', ensureShippingButton);
+    };
+
+    const blockPlaceOrderWhenDirty = () => {
+        const form = $('form.checkout');
+        form.on('submit', function (event) {
+            if (dirtyBilling || (isShippingDifferent() && dirtyShipping)) {
+                event.preventDefault();
+                showErrorNotice('Please save your address(es) to refresh tax before placing the order.');
+                syncPlaceOrderButton();
+                return false;
+            }
+            return true;
+        });
+    };
+
+    const debouncedHandleAddressChange = (delayMs = 250) => {
+        if (debounceTimer) {
+            clearTimeout(debounceTimer);
+        }
+        debounceTimer = setTimeout(() => {
+            debounceTimer = null;
+            handleAddressChange();
+        }, delayMs);
+    };
+
+    const watchAddressChanges = () => {
+        const selectors = [
+            '#billing_country',
+            '#billing_address_1',
+            '#billing_city',
+            '#billing_state',
+            '#billing_postcode',
+            '#shipping_country',
+            '#shipping_address_1',
+            '#shipping_city',
+            '#shipping_state',
+            '#shipping_postcode',
+            '#ship-to-different-address-checkbox'
+        ];
+
+        selectors.forEach((selector) => {
+            $(document.body).on('change', selector, handleAddressChange);
+            $(document.body).on('keyup', selector, () => debouncedHandleAddressChange());
+
+            if (selector.indexOf('billing_') !== -1) {
+                $(document.body).on('change keyup', selector, () => setDirty('billing'));
+            } else if (selector.indexOf('shipping_') !== -1) {
+                $(document.body).on('change keyup', selector, () => setDirty('shipping'));
+            }
+        });
+
+        $(document.body).on('updated_checkout wc_address_i18n_ready', handleAddressChange);
+
+        $(document.body).on('change', '#ship-to-different-address-checkbox', () => {
+            setDirty('shipping', isShippingDifferent());
+            handleAddressChange();
+            startAddressPolling();
+        });
+    };
+
+    const registerManualTriggers = () => {
+        const registry = window.sovosDeferUpdateTriggers || {};
+
+        registry.isBillingComplete = isBillingComplete;
+        registry.isShippingComplete = isShippingComplete;
+        registry.hasPendingUpdate = () => false;
+        registry.flushPendingUpdate = () => {};
+        registry.forceUpdate = forceUpdate;
+
+        window.sovosDeferUpdateTriggers = registry;
+    };
+
+    $.fn.trigger = function () {
+        const args = Array.prototype.slice.call(arguments);
+        const eventType = args[0];
+        const normalizedType = (eventType && eventType.type) ? eventType.type : eventType;
+
+        if (normalizedType === 'update_checkout' && this.is(document.body) && !allowImmediate) {
+            return this;
+        }
+
+        return originalTrigger.apply(this, args);
+    };
+
+    originalTrigger.__sovosDeferredApplied = true;
+
+    $(function () {
+        registerManualTriggers();
+        watchAddressChanges();
+        addSaveButtons();
+        blockPlaceOrderWhenDirty();
+
+        // Capture initial state (including values filled by WooCommerce after DOM ready) and trigger an update if needed.
+        scheduleInitialRechecks();
+        syncPlaceOrderButton();
+
+        // Clear in-flight guard when WooCommerce finishes or errors.
+        $(document.body).on('updated_checkout checkout_error', () => {
+            isUpdatingCheckout = false;
+        });
+    });
+})(jQuery);
+JS;
+
+        wp_add_inline_script( $checkout_handle, $inline_script, 'after' );
 
     }
 
@@ -739,13 +1127,15 @@ class Woo_Sovos_Public {
      * @since   1.2.0
      */
     public function get_unique_id_from_response( $response ) {
-        $unique_id = (
-            $response['data']['txwTrnDocId'] ) &&
-            ! empty( isset( $response['data']['txwTrnDocId'] )
-        ) ?
-            $response['data']['txwTrnDocId'] :
-            $response['data']['trnDocNum'];
-        return $unique_id;
+        if ( ! is_array( $response ) || ! isset( $response['data'] ) || ! is_array( $response['data'] ) ) {
+            return null;
+        }
+
+        if ( ! empty( $response['data']['txwTrnDocId'] ) ) {
+            return $response['data']['txwTrnDocId'];
+        }
+
+        return isset( $response['data']['trnDocNum'] ) ? $response['data']['trnDocNum'] : null;
     }
 
     /**
@@ -853,20 +1243,76 @@ class Woo_Sovos_Public {
 
     /**
      * Shared access point for a Sovos quote, preferring cached data.
+     * GUARANTEES at most one live Sovos call per cache key.
      */
     protected function get_or_create_shared_quote( $line_items, $order = null ) {
-        if ( $this->is_exempt_via_session_or_order( $order ) )
+        if ( $this->is_exempt_via_session_or_order( $order ) ) {
             return false;
+        }
 
-        $response = $this->get_cached_quote_from_order( $order );
+        // 1) Order-level cache always wins.
+        if ( $order instanceof \WC_Order ) {
+            $cached = $this->get_cached_quote_from_order( $order );
+            if ( $cached ) {
+                return $cached;
+            }
+        }
 
-        if ( ! $response )
-            $response = $this->get_cached_quote_from_session( $line_items );
+        // 2) Build deterministic cache key + lock key.
+        $cache_key = $this->generate_cache_key( $line_items );
+        $lock_key  = $this->get_quote_lock_key( $cache_key );
 
-        if ( ! $response )
+        $this->log_quote_event( 'before_cache', [
+            'cache_key'  => $cache_key,
+            'has_runtime'=> isset( $this->runtime_quote_cache[ $cache_key ] ) ? 1 : 0,
+            'has_lock'   => $this->has_active_quote_lock( $lock_key ) ? 1 : 0,
+        ] );
+
+        // 3) Session / transient cache.
+        $cached = $this->get_cached_quote( $cache_key );
+        if ( $cached ) {
+            $this->log_quote_event( 'cache_hit', [ 'cache_key' => $cache_key ] );
+            return $cached;
+        }
+
+        if ( ! empty( $this->runtime_quote_inflight[ $cache_key ] ) ) {
+            $this->log_quote_event( 'inflight_same_request', [ 'cache_key' => $cache_key ] );
+            return $this->get_cached_quote( $cache_key ) ?: false;
+        }
+
+        // 4) If another request is already quoting, wait for it.
+        if ( $this->has_active_quote_lock( $lock_key ) ) {
+            $waited = $this->wait_for_cached_quote( $cache_key );
+            return $waited ?: false;
+        }
+
+        // 5) Acquire lock before calling Sovos.
+        if ( ! $this->acquire_quote_lock( $lock_key ) ) {
+            $waited = $this->wait_for_cached_quote( $cache_key );
+            return $waited ?: false;
+        }
+
+        try {
+            $this->runtime_quote_inflight[ $cache_key ] = true;
+            // 6) Single live Sovos call.
             $response = $this->quote_tax( $line_items );
 
-        return $this->is_valid_quote_response( $response ) ? $response : false;
+            if ( $this->is_valid_quote_response( $response ) ) {
+                $this->set_cached_quote( $cache_key, $response );
+
+                if ( $order instanceof \WC_Order ) {
+                    $this->persist_quote_on_order( $order, $response );
+                }
+
+                return $response;
+            }
+
+            return false;
+        } finally {
+            unset( $this->runtime_quote_inflight[ $cache_key ] );
+            // 7) Always release lock.
+            $this->clear_quote_lock( $lock_key );
+        }
     }
 
     /**
@@ -879,50 +1325,38 @@ class Woo_Sovos_Public {
     /**
      * Quote (estimate) tax for the current cart / order lines.
      *
-     * Adds a simple Woo‑session cache so we don’t hammer Sovos with
-     * identical requests during the same checkout visit.
-     *
      * @param array $line_items Cart or order items.
      * @return array|bool Sovos response array on success, false on failure.
      */
     public function quote_tax( $line_items ) {
-
-        if ( $this->is_exempt_via_session_or_order() )
+        if ( $this->is_exempt_via_session_or_order() ) {
             return false;
-
-        /* ────────────────────────────────
-        *  NEW: session‑level cache check
-        * ──────────────────────────────── */
-        $cache_key = $this->generate_cache_key( $line_items ); // 32‑char MD5
-        $cached    = $this->get_cached_quote( $cache_key );
-
-        // If we’ve already quoted this exact cart + address combo,
-        // short‑circuit and hand back the stored response.
-        if ( $cached ) {
-            return $cached;
         }
 
-        /* ────────────────────────────────
-        *  ORIGINAL logic starts here
-        * ──────────────────────────────── */
         $tax_service = $this->prepare_tax_service( $line_items );
         if ( ! $tax_service ) {
             return false;                           // prerequisites not met
         }
 
-        $response = $tax_service->quoteTax();       // live Sovos call
-        $tax_service->clearTaxService();            // tidy up
+        try {
+            $this->log_quote_event( 'LIVE_CALL', [
+                'cache_key' => is_array( $line_items ) ? $this->generate_cache_key( $line_items ) : 'n/a',
+            ] );
+            $response = $tax_service->quoteTax();       // live Sovos call
+        } catch ( \Throwable $e ) {
+            throw $e;
+        } finally {
+            $tax_service->clearTaxService();            // tidy up
+        }
 
-        // Existing diagnostics / storage
-        $this->log_response( [ 'response' => $response ] );
-        $this->store_response_in_session( $response );
+        // Diagnostics / storage.
+        if ( $this->is_valid_quote_response( $response ) ) {
+            $this->log_response( [ 'response' => $response ] );
+            $this->store_response_in_session( $response );
+            return $response;
+        }
 
-        /* ────────────────────────────────
-        *  NEW: cache the fresh response
-        * ──────────────────────────────── */
-        $this->set_cached_quote( $cache_key, $response );
-
-        return $response;
+        return false;
     }
 
 
@@ -1320,7 +1754,6 @@ class Woo_Sovos_Public {
                 $sovos_tax['tax_rate'] = $tax_rate;
                 $sovos_tax['_tax_quoted'] = true;
                 $line_item->update_meta_data('_sovos_tax', $sovos_tax);
-                $line_item->save_meta_data();
             }
 
             // Return the updated item in the collection
@@ -2310,7 +2743,7 @@ class Woo_Sovos_Public {
      */
     public function set_tax_rates( $line_items, $type_of_items = null ) {
 
-        $response = $this->quote_tax( $line_items );
+        $response = $this->get_or_create_shared_quote( $line_items );
 
         // Check if the response is valid.
         if ( $response['success'] && isset( $response['data']['lnRslts'] ) ) :
@@ -2552,6 +2985,17 @@ class Woo_Sovos_Public {
 
         if ( ! empty( $exemption_context['is_exempt'] ) ) {
             $log( sprintf( 'EARLY RETURN: exemption detected (%s)', $exemption_context['reason'] ?: 'unspecified' ) );
+            return $original_tax_rates;
+        }
+
+        $session = $this->get_wc_session();
+        if ( $session && isset( $_POST['sovos_quote_nonce'] ) ) {
+            $session->set( 'sovos_quote_nonce', sanitize_text_field( wp_unslash( $_POST['sovos_quote_nonce'] ) ) );
+        }
+
+        $to_address = $this->set_to_address();
+        if ( ! $this->validate_address( $to_address ) ) {
+            $log( 'EARLY RETURN: incomplete to_address' );
             return $original_tax_rates;
         }
 
@@ -3148,31 +3592,13 @@ class Woo_Sovos_Public {
         $cart    = $this->get_cart();
         $session = $this->get_wc_session();
 
-        $shipping_methods = [];
-        if ( $session ) {
-            $chosen_methods = $session->get( 'chosen_shipping_methods' );
-            if ( is_array( $chosen_methods ) ) {
-                $shipping_methods = array_values( array_filter( $chosen_methods ) );
-            }
-        }
-
         $coupons          = [];
-        $fees             = [];
-        $line_tax_classes = [];
 
         if ( $cart ) {
             $coupons = array_values( $cart->get_applied_coupons() );
-
-            foreach ( $cart->get_fees() as $fee ) {
-                $fees[] = [
-                    'id'        => isset( $fee->id ) ? $fee->id : $fee->name,
-                    'name'      => $fee->name,
-                    'amount'    => $fee->amount,
-                    'taxable'   => $fee->taxable,
-                    'tax_class' => $fee->tax_class,
-                ];
-            }
         }
+
+        $quote_nonce = $session ? $session->get( 'sovos_quote_nonce' ) : null;
 
         $customer_roles = [];
         $customer       = function_exists( 'WC' ) && WC()->customer ? WC()->customer : null;
@@ -3182,20 +3608,11 @@ class Woo_Sovos_Public {
             $customer_roles = (array) $user->roles;
         }
 
-        $tax_class_markers = [
-            'session_original_tax_class' => $session ? $session->get( 'original_tax_class' ) : null,
-            'using_original_tax_class'   => $session ? $session->get( 'use_original_tax_class' ) : null,
-            'customer_tax_class'         => ( $customer && method_exists( $customer, 'get_tax_class' ) ) ? $customer->get_tax_class() : null,
-            'customer_vat_exempt'        => ( $customer && method_exists( $customer, 'get_is_vat_exempt' ) ) ? $customer->get_is_vat_exempt() : null,
-        ];
-
         $line_items_payload = array_map(
-            static function ( $item ) use ( &$line_tax_classes ) {
+            static function ( $item ) {
                 $product_id = is_array( $item ) ? $item['data']->get_id() : $item->get_product_id();
                 $quantity   = is_array( $item ) ? $item['quantity']       : $item->get_quantity();
                 $tax_class  = is_array( $item ) ? $item['data']->get_tax_class() : $item->get_tax_class();
-
-                $line_tax_classes[] = $tax_class;
 
                 return [
                     'id'        => $product_id,
@@ -3212,12 +3629,10 @@ class Woo_Sovos_Public {
         $payload = [
             'addr'          => $address,
             'cart'          => $line_items_payload,
-            'shipping'      => $shipping_methods,
             'coupons'       => $coupons,
-            'fees'          => $fees,
+            'quote_nonce'   => $quote_nonce,
             'customer'      => [
                 'roles'       => $customer_roles,
-                'tax_markers' => $tax_class_markers,
             ],
             'exemption'     => [
                 'product_flags'       => $exemption_context['product_flags'],
@@ -3226,18 +3641,42 @@ class Woo_Sovos_Public {
                 'email_exempt'        => $exemption_context['email_exempt'],
                 'email'               => $exemption_context['email'],
                 'allowlist_hash'      => $exemption_context['allowlist_hash'],
-                'session_exempt'      => $session ? $session->get( 'sovos_is_exempt' ) : null,
             ],
-            'line_classes'  => $line_tax_classes,
         ];
 
         return md5( wp_json_encode( $payload ) );     // 32‑char cache key
     }
 
+    protected function log_quote_event( string $stage, array $context = [] ): void {
+        if ( ! function_exists( 'wc_get_logger' ) ) {
+            return;
+        }
+
+        $context['stage'] = $stage;
+        $context['bt']    = function_exists( 'wp_debug_backtrace_summary' )
+            ? wp_debug_backtrace_summary( null, 6, false )
+            : 'no_bt';
+
+        wc_get_logger()->info( 'SOVOS QUOTE ' . wp_json_encode( $context ), [ 'source' => 'sovos' ] );
+    }
+
     /** Read / write helpers around WC()->session */
     protected function get_cached_quote( string $key ) {
+        if ( isset( $this->runtime_quote_cache[ $key ] ) && $this->is_valid_quote_response( $this->runtime_quote_cache[ $key ] ) ) {
+            return $this->runtime_quote_cache[ $key ];
+        }
+
         $session = $this->get_wc_session();
         $response = $session ? $session->get( "sovos_quote_$key" ) : false;
+
+        if ( ! $this->is_valid_quote_response( $response ) ) {
+            // Fallback to transient in case WC session is not yet populated.
+            $response = get_transient( $this->get_quote_response_transient_key( $key ) );
+            if ( $this->is_valid_quote_response( $response ) && $session ) {
+                // Rehydrate session cache for subsequent requests.
+                $session->set( "sovos_quote_$key", $response );
+            }
+        }
 
         return $this->is_valid_quote_response( $response ) ? $response : false;
     }
@@ -3247,10 +3686,81 @@ class Woo_Sovos_Public {
             return;
         }
 
+        // Always memoize for the current request.
+        $this->runtime_quote_cache[ $key ] = $response;
+
         $session = $this->get_wc_session();
         if ( $session ) {
             $session->set( "sovos_quote_$key", $response );
+            // Track keys so we can clear transients later.
+            $keys = $session->get( 'sovos_quote_keys' );
+            if ( ! is_array( $keys ) ) {
+                $keys = [];
+            }
+            if ( ! in_array( $key, $keys, true ) ) {
+                $keys[] = $key;
+                $session->set( 'sovos_quote_keys', $keys );
+            }
         }
+
+        // Always write a transient so concurrent PHP requests see the cached response even before WC session hydration.
+        set_transient( $this->get_quote_response_transient_key( $key ), $response, 5 * MINUTE_IN_SECONDS );
+    }
+
+    /**
+     * 🔐 Quote locks to avoid duplicate outbound calls for the same cart/address.
+     * Uses a transient so concurrent PHP requests see the lock immediately.
+     */
+    protected function get_quote_lock_key( string $cache_key ): string {
+        return "sovos_quote_lock_$cache_key";
+    }
+
+    protected function get_quote_response_transient_key( string $cache_key ): string {
+        return "sovos_quote_resp_$cache_key";
+    }
+
+    protected function has_active_quote_lock( string $lock_key ): bool {
+        $lock = get_transient( $lock_key );
+        if ( ! is_array( $lock ) || empty( $lock['ts'] ) ) {
+            return false;
+        }
+
+        // Expire stale locks (default 5s)
+        if ( time() - (int) $lock['ts'] > 5 ) {
+            $this->clear_quote_lock( $lock_key );
+            return false;
+        }
+
+        return true;
+    }
+
+    protected function acquire_quote_lock( string $lock_key ): bool {
+        if ( $this->has_active_quote_lock( $lock_key ) ) {
+            return false;
+        }
+
+        // set_transient is shared across concurrent requests.
+        return (bool) set_transient( $lock_key, [ 'ts' => time() ], 10 );
+    }
+
+    protected function clear_quote_lock( string $lock_key ): void {
+        delete_transient( $lock_key );
+    }
+
+    /**
+     * When a lock exists, wait briefly for the first request to populate the cache.
+     */
+    protected function wait_for_cached_quote( string $cache_key ) {
+        $attempts = 30; // ~3s total
+        while ( $attempts-- > 0 ) {
+            $cached = $this->get_cached_quote( $cache_key );
+            if ( $cached ) {
+                return $cached;
+            }
+            usleep( 100000 ); // 100ms
+        }
+
+        return false;
     }
 
     public function clear_tax_quote_cache( $order_id ): void {    
@@ -3266,11 +3776,21 @@ class Woo_Sovos_Public {
         }
     
         try {
+            // Clear session-scoped caches.
             foreach ( $data as $key => $value ) {
                 if ( strpos( $key, 'sovos_quote_' ) === 0 ) {
                     $session->__unset( $key );
                 }
             }
+
+            // Clear transient response caches using tracked keys.
+            $tracked_keys = $session->get( 'sovos_quote_keys' );
+            if ( is_array( $tracked_keys ) ) {
+                foreach ( $tracked_keys as $tracked_key ) {
+                    delete_transient( $this->get_quote_response_transient_key( $tracked_key ) );
+                }
+            }
+            $session->__unset( 'sovos_quote_keys' );
         } catch ( Exception $e ) {
             error_log("Exception while clearing tax quote cache: " . $e->getMessage());
         }
