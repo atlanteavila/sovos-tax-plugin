@@ -3569,29 +3569,10 @@ JS;
         $cart    = $this->get_cart();
         $session = $this->get_wc_session();
 
-        $shipping_methods = [];
-        if ( $session ) {
-            $chosen_methods = $session->get( 'chosen_shipping_methods' );
-            if ( is_array( $chosen_methods ) ) {
-                $shipping_methods = array_values( array_filter( $chosen_methods ) );
-            }
-        }
-
         $coupons          = [];
-        $fees             = [];
 
         if ( $cart ) {
             $coupons = array_values( $cart->get_applied_coupons() );
-
-            foreach ( $cart->get_fees() as $fee ) {
-                $fees[] = [
-                    'id'        => isset( $fee->id ) ? $fee->id : $fee->name,
-                    'name'      => $fee->name,
-                    'amount'    => $fee->amount,
-                    'taxable'   => $fee->taxable,
-                    'tax_class' => $fee->tax_class,
-                ];
-            }
         }
 
         $customer_roles = [];
@@ -3623,9 +3604,7 @@ JS;
         $payload = [
             'addr'          => $address,
             'cart'          => $line_items_payload,
-            'shipping'      => $shipping_methods,
             'coupons'       => $coupons,
-            'fees'          => $fees,
             'customer'      => [
                 'roles'       => $customer_roles,
             ],
