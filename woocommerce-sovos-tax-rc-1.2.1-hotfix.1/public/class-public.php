@@ -512,6 +512,21 @@ JS;
     }
 
     /**
+     * Capture the quote nonce early so all tax passes share a stable cache key.
+     */
+    public function capture_quote_nonce() {
+        $session = $this->get_wc_session();
+        if ( ! $session || ! isset( $_POST['sovos_quote_nonce'] ) ) {
+            return;
+        }
+
+        $session->set(
+            'sovos_quote_nonce',
+            sanitize_text_field( wp_unslash( $_POST['sovos_quote_nonce'] ) )
+        );
+    }
+
+    /**
      * Check if API Credentials Are Set
      * 
      * @return bool - True if the API credentials are set, false otherwise.
@@ -2986,11 +3001,6 @@ JS;
         if ( ! empty( $exemption_context['is_exempt'] ) ) {
             $log( sprintf( 'EARLY RETURN: exemption detected (%s)', $exemption_context['reason'] ?: 'unspecified' ) );
             return $original_tax_rates;
-        }
-
-        $session = $this->get_wc_session();
-        if ( $session && isset( $_POST['sovos_quote_nonce'] ) ) {
-            $session->set( 'sovos_quote_nonce', sanitize_text_field( wp_unslash( $_POST['sovos_quote_nonce'] ) ) );
         }
 
         $to_address = $this->set_to_address();

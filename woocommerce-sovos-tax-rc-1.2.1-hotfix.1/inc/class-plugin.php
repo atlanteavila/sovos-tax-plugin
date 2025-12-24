@@ -140,6 +140,9 @@ class Woo_Sovos_Plugin {
         // Enqueue styles.
         $this->loader->add_action('wp_enqueue_scripts', $public, 'enqueue_styles');
 
+        // Capture Sovos quote nonce before tax calculations begin.
+        $this->loader->add_action( 'template_redirect', $public, 'capture_quote_nonce', 1 );
+
         // Gate checkout recalcs until address data is ready.
         $this->loader->add_action('wp_enqueue_scripts', $public, 'enqueue_checkout_gating_script', 20);
 
