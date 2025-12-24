@@ -337,6 +337,21 @@ class Woo_Sovos_Public {
         $(document.body).trigger('checkout_error', [message]);
     };
 
+    const ensureQuoteNonceField = (nonceValue) => {
+        const form = $('form.checkout');
+        if (!form.length) {
+            return;
+        }
+        let field = form.find('input[name="sovos_quote_nonce"]');
+        if (!field.length) {
+            field = $('<input type="hidden" name="sovos_quote_nonce" />');
+            form.append(field);
+        }
+        if (nonceValue) {
+            field.val(nonceValue);
+        }
+    };
+
     const saveAddressAndUpdate = (type) => {
         if (type === 'billing' && !isBillingComplete()) {
             showErrorNotice('Please complete your billing address before saving.');
@@ -348,6 +363,9 @@ class Woo_Sovos_Public {
             return;
         }
 
+        const quoteNonce = String(Date.now());
+        window.sovosQuoteNonce = quoteNonce;
+        ensureQuoteNonceField(quoteNonce);
         setDirty(type, false);
         forceUpdate();
     };
@@ -2970,6 +2988,11 @@ JS;
             return $original_tax_rates;
         }
 
+        $session = $this->get_wc_session();
+        if ( $session && isset( $_POST['sovos_quote_nonce'] ) ) {
+            $session->set( 'sovos_quote_nonce', sanitize_text_field( wp_unslash( $_POST['sovos_quote_nonce'] ) ) );
+        }
+
         $to_address = $this->set_to_address();
         if ( ! $this->validate_address( $to_address ) ) {
             $log( 'EARLY RETURN: incomplete to_address' );
@@ -3575,6 +3598,8 @@ JS;
             $coupons = array_values( $cart->get_applied_coupons() );
         }
 
+        $quote_nonce = $session ? $session->get( 'sovos_quote_nonce' ) : null;
+
         $customer_roles = [];
         $customer       = function_exists( 'WC' ) && WC()->customer ? WC()->customer : null;
 
@@ -3605,6 +3630,7 @@ JS;
             'addr'          => $address,
             'cart'          => $line_items_payload,
             'coupons'       => $coupons,
+            'quote_nonce'   => $quote_nonce,
             'customer'      => [
                 'roles'       => $customer_roles,
             ],
